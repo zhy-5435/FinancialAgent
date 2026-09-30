@@ -1,0 +1,17 @@
+# Python 运行时与缓存
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# IDE 配置
+.idea/
+.vscode/
+
+# 构建产物：双库可由 python -m src.build_pipeline 从 Excel 全量重建
+db/
+data/processed/
+
+# 系统与日志
+.DS_Store
+*.log

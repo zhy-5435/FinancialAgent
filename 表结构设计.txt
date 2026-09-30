@@ -1,0 +1,49 @@
+PRAGMA foreign_keys = ON;
+
+-- 表1：文档版本表
+CREATE TABLE doc_version (
+    doc_version_id  TEXT PRIMARY KEY,           -- 如 REG-001:V2026
+    doc_id          TEXT NOT NULL,              -- 如 REG-001
+    doc_name        TEXT NOT NULL,
+    version         TEXT NOT NULL,              -- 如 V2026
+    doc_type        TEXT,                       -- 监管规则 / 内部制度 / 产品说明书
+    publish_dept    TEXT,
+    publish_date    TEXT,                       -- YYYY-MM-DD
+    effective_date  TEXT,                       -- YYYY-MM-DD
+    expire_date     TEXT,                       -- YYYY-MM-DD，NULL 表示长期有效
+    status          TEXT NOT NULL DEFAULT 'valid'
+        CHECK (status IN ('draft','valid','superseded','expired','archived')),
+    file_path       TEXT,
+    created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (doc_id, version)
+);
+
+-- 表2：知识切片表
+CREATE TABLE knowledge_chunk (
+    knowledge_id    TEXT PRIMARY KEY,           -- 如 L1-0001
+    doc_version_id  TEXT NOT NULL,              -- 关联 doc_version.doc_version_id
+    clause_position TEXT,                       -- 如 2.4.2，产品说明书可为 NULL
+    heading_path    TEXT,                       -- 如 第二章 交易时间 > 2.4 交易时间 > 2.4.2
+    chunk_type      TEXT NOT NULL DEFAULT 'clause'
+        CHECK (chunk_type IN (
+            'clause','table','exception','principle','definition',
+            'product_element','fee','risk','process','other'
+        )),
+    content         TEXT NOT NULL,              -- 检索用文本
+    original_text   TEXT NOT NULL,              -- 原文逐字摘录
+    keywords        TEXT,                       -- JSON 字符串，如 ["科创板","20%"]
+    status          TEXT NOT NULL DEFAULT 'valid'
+        CHECK (status IN ('valid','expired','deleted','need_review')),
+    FOREIGN KEY (doc_version_id) REFERENCES doc_version(doc_version_id)
+);
+
+-- 索引
+CREATE INDEX idx_doc_version_status
+ON doc_version(status, effective_date, expire_date);
+
+CREATE INDEX idx_chunk_doc_version
+ON knowledge_chunk(doc_version_id, status);
+
+CREATE INDEX idx_chunk_type
+ON knowledge_chunk(chunk_type);
