@@ -22,6 +22,10 @@ EMBEDDING_MODEL_NAME = "BAAI/bge-small-zh-v1.5"
 VECTOR_DIM = 512  # bge-small-zh-v1.5 固定输出维度为512
 TOP_K = 3
 
+# FastAPI 检索服务配置
+API_HOST = "127.0.0.1"
+API_PORT = 8000
+
 # 确保目录存在
 for path in [DATA_DIR, RAW_DATA_DIR, DB_DIR, DB_DIR/"sqlite", DB_DIR/"milvus", DATA_DIR/"excel"]:
     path.mkdir(parents=True, exist_ok=True)

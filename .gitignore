@@ -12,6 +12,10 @@ venv/
 db/
 data/processed/
 
+# 敏感配置：大模型 API Key 等，禁止提交
+.env
+.env.*
+
 # 系统与日志
 .DS_Store
 *.log
