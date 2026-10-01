@@ -15,7 +15,7 @@ app = FastAPI(
     title="L1 金融知识库检索服务",
     description=(
         "L2 检索服务层：基于 SQLite 权威主库的双路混合检索（Milvus 向量语义召回 + "
-        "SQLite FTS5 关键词精准召回，去重后按相似度×0.7 + 关键词得分×0.3 加权排序），"
+        "SQLite FTS5 关键词精准召回，去重后两路得分各做 min-max 归一化再按向量×0.8 + 关键词×0.2 加权排序），"
         "结果天然过滤非有效状态与生效期外切片，出参含溯源五要素与三重得分供 Agent 强制溯源引用。"
     ),
     version="1.0.0",
@@ -32,7 +32,7 @@ def health():
 def search(req: SearchRequest):
     """
     双路混合检索：向量路（Milvus COSINE）+ 关键词路（SQLite FTS5 BM25）并行召回 Top10，
-    去重合并后按综合得分（相似度×0.7 + 关键词得分×0.3）降序返回；
+    去重合并后按综合得分（归一化向量相似度×0.8 + 归一化关键词得分×0.2）降序返回；
     命中 knowledge_id 后回 SQLite 补全切片详情，返回切片内容与溯源信息。
     """
     try:

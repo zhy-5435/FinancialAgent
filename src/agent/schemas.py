@@ -37,7 +37,7 @@ class SourceHit(BaseModel):
     effective_date: str | None = Field(None, description="生效日期")
     similarity: float = Field(..., description="余弦相似度")
     keyword_score: float = Field(..., description="关键词得分（BM25 归一化到 [0,1]）")
-    score: float = Field(..., description="综合得分 = 相似度×0.7 + 关键词得分×0.3")
+    score: float = Field(..., description="综合得分 = 归一化向量相似度×0.8 + 归一化关键词得分×0.2")
 
 
 class ChatResponse(BaseModel):
