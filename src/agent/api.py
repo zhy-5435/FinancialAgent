@@ -13,13 +13,20 @@ import time
 import uuid
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from src.agent.config import AGENT_CORS_ORIGINS, SEARCH_API_BASE
 from src.agent.graph import ask_detail, ask_stream
-from src.agent.schemas import ChatRequest, ChatResponse
+from src.agent.schemas import (
+    ChatRequest,
+    ChatResponse,
+    RestoredMessage,
+    SessionItem,
+    SessionMessagesResponse,
+)
+from src.memory.memory_manager import memory_manager
 
 
 # ---------- 应用实例 ----------
@@ -69,7 +76,7 @@ def chat(req: ChatRequest):
     session_id = req.session_id or f"sess-{uuid.uuid4().hex[:12]}"
     started = time.perf_counter()
     try:
-        result = ask_detail(req.question)
+        result = ask_detail(req.question, session_id)
     except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError) as e:
         raise HTTPException(
             status_code=502,
@@ -110,7 +117,7 @@ def chat_stream(req: ChatRequest):
 
     def gen():
         try:
-            for ev in ask_stream(req.question):
+            for ev in ask_stream(req.question, session_id):
                 if ev["event"] == "meta":
                     yield _sse("meta", {
                         "session_id": session_id,
@@ -139,6 +146,48 @@ def chat_stream(req: ChatRequest):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ---------- 会话历史恢复（多轮持久化） ----------
+
+@app.get("/sessions", response_model=list[SessionItem], summary="会话列表")
+def list_sessions(limit: int = Query(50, ge=1, le=200, description="返回会话数上限")):
+    """按最近活跃降序返回已持久化的会话列表，供前端侧栏历史恢复入口"""
+    return [
+        SessionItem(
+            session_id=s.session_id, title=s.title,
+            updated_at=s.updated_at, message_count=s.message_count,
+        )
+        for s in memory_manager.list_sessions(limit=limit)
+    ]
+
+
+@app.get(
+    "/sessions/{session_id}/messages",
+    response_model=SessionMessagesResponse,
+    summary="会话历史消息",
+)
+def get_session_messages(
+    session_id: str,
+    limit: int | None = Query(None, ge=1, le=500, description="仅返回最近 N 条（缺省全部）"),
+):
+    """返回指定会话的可见历史消息（仅 user/assistant，按时间升序），供多轮回放"""
+    restored = [
+        RestoredMessage(
+            message_id=m.message_id, role=m.role, content=m.content,
+            intent=m.intent, answer_type=m.answer_type, created_at=m.created_at,
+        )
+        for m in memory_manager.get_messages(session_id, limit=limit)
+        if m.role in ("user", "assistant")
+    ]
+    return SessionMessagesResponse(session_id=session_id, messages=restored)
+
+
+@app.delete("/sessions/{session_id}", summary="删除会话")
+def delete_session(session_id: str):
+    """删除会话的消息与压缩日志（原始审计仅在显式删除时移除）"""
+    memory_manager.delete_session(session_id)
+    return {"session_id": session_id, "deleted": True}
 
 
 if __name__ == "__main__":

@@ -28,6 +28,8 @@ EXCEL_PATH = DATA_DIR / "excel" / "L1_pro.xlsx"
 DB_DIR = PROJECT_ROOT / "db"
 SQLITE_DB_PATH = DB_DIR / "sqlite" / "l1_core.db"
 MILVUS_DB_PATH = DB_DIR / "milvus" / "l1_milvus.db"
+# 会话记忆库（多轮上下文 + 审计存档），与权威知识库 l1_core.db 物理隔离，互不污染
+MEMORY_DB_PATH = DB_DIR / "sqlite" / "l1_memory.db"
 
 # 确保目录存在（首次运行时自动创建）
 for _path in [DATA_DIR, RAW_DATA_DIR, DB_DIR, DB_DIR / "sqlite", DB_DIR / "milvus", DATA_DIR / "excel"]:

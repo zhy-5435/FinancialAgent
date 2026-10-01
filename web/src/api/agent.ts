@@ -4,6 +4,9 @@ import { apiFetch, apiStream, ApiError } from './client';
 import type {
   AgentHealth,
   ChatResponse,
+  DeleteSessionResponse,
+  SessionItem,
+  SessionMessagesResponse,
   StreamDoneEvent,
   StreamErrorEvent,
   StreamMetaEvent,
@@ -12,6 +15,29 @@ import type {
 
 export function fetchAgentHealth(): Promise<AgentHealth> {
   return apiFetch<AgentHealth>('agent', '/health', { timeoutMs: 8_000 });
+}
+
+/** 会话列表（GET /sessions，按最近活跃降序，后端返回裸数组） */
+export function fetchSessions(limit = 50): Promise<SessionItem[]> {
+  return apiFetch<SessionItem[]>('agent', `/sessions?limit=${limit}`, { timeoutMs: 10_000 });
+}
+
+/** 指定会话的可见历史消息（仅 user/assistant，按时间升序） */
+export function fetchSessionMessages(sessionId: string): Promise<SessionMessagesResponse> {
+  return apiFetch<SessionMessagesResponse>(
+    'agent',
+    `/sessions/${encodeURIComponent(sessionId)}/messages`,
+    { timeoutMs: 10_000 },
+  );
+}
+
+/** 删除会话的消息与压缩日志存档 */
+export function deleteSession(sessionId: string): Promise<DeleteSessionResponse> {
+  return apiFetch<DeleteSessionResponse>(
+    'agent',
+    `/sessions/${encodeURIComponent(sessionId)}`,
+    { method: 'DELETE', timeoutMs: 10_000 },
+  );
 }
 
 export function sendChat(question: string, sessionId?: string | null): Promise<ChatResponse> {

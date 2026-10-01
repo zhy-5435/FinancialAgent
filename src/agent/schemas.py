@@ -54,3 +54,27 @@ class ChatResponse(BaseModel):
     answer_type: str = Field(..., description="generated=基于有效切片作答；refused=无有效证据拒答；chatted=闲聊/常识对话；searched=财经简报（白名单网搜证据生成，无素材时为固定话术）；quoted=实时行情快照（表格化，含来源与免责，不经 LLM 转写）")
     sources: list[SourceHit] = Field(default_factory=list, description="作答依据切片列表，非 kb_qa 分支与拒答时为空")
     elapsed_ms: int = Field(..., description="本次问答耗时（毫秒）")
+
+
+class SessionItem(BaseModel):
+    """GET /sessions 会话列表项（供前端侧栏历史恢复）"""
+    session_id: str = Field(..., description="会话 ID")
+    title: str = Field("", description="会话标题（首条用户提问）")
+    updated_at: str | None = Field(None, description="最近一条消息时间")
+    message_count: int = Field(0, description="消息总数")
+
+
+class RestoredMessage(BaseModel):
+    """历史恢复的单条可见消息（仅 user/assistant）"""
+    message_id: str = Field(..., description="消息唯一 ID")
+    role: str = Field(..., description="user / assistant")
+    content: str = Field(..., description="消息正文（存档已做字段级脱敏）")
+    intent: str | None = Field(None, description="本轮意图（user 消息）")
+    answer_type: str | None = Field(None, description="作答类型（assistant 消息）")
+    created_at: str | None = Field(None, description="入库时间")
+
+
+class SessionMessagesResponse(BaseModel):
+    """GET /sessions/{session_id}/messages 响应体"""
+    session_id: str = Field(..., description="会话 ID")
+    messages: list[RestoredMessage] = Field(default_factory=list, description="按时间升序的可见历史消息")

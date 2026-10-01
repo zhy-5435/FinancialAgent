@@ -9,7 +9,7 @@ venv/
 .idea/
 .vscode/
 
-# 构建产物：双库可由 python -m src.build_pipeline 从 Excel 全量重建
+# 构建产物：双库可由 python -m src.data.pipeline 从 Excel 全量重建
 db/
 data/processed/
 

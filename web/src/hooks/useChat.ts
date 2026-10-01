@@ -1,12 +1,12 @@
 // 会话状态机：idle → sending → idle；消息流生命周期管理
 // 问答主链路走 SSE 流式（打印机效果），404 时自动回退整包 /chat
-// session_id 由前端生成并随请求上送，后端将来做多轮历史时直接复用该字段
+// session_id 由前端生成并随请求上送，后端按其持久化多轮历史（列表/恢复/删除见 useSessions）
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useState } from 'react';
 
 import { ApiError } from '../api/client';
 import { sendChat, streamChat } from '../api/agent';
-import type { AnswerType, ChatResponse, SourceHit } from '../api/types';
+import type { AnswerType, ChatResponse, RestoredMessage, SourceHit } from '../api/types';
 
 export type MessageRole = 'user' | 'assistant';
 /** normal=正常回答；refused=拒答话术；error=链路错误提示；pending=等待首包骨架；streaming=流式打字中 */
@@ -30,9 +30,10 @@ function genId(prefix: string): string {
 
 /**
  * answer_type → 气泡样式：拒答弱化样式仅限知识库低置信拒答（refused），
- * 闲聊（chatted）、行情（quoted）、资讯占位（searched）等均按正常回答展示
+ * 闲聊（chatted）、行情（quoted）、资讯占位（searched）等均按正常回答展示；
+ * 存档中的旧值/新增枚举（string|null）同样回落到 normal 渲染，保持向后兼容
  */
-function kindForAnswer(answerType: AnswerType): MessageKind {
+function kindForAnswer(answerType: AnswerType | string | null): MessageKind {
   return answerType === 'refused' ? 'refused' : 'normal';
 }
 
@@ -49,25 +50,45 @@ function toAssistantMessage(res: ChatResponse): ChatMessage {
   };
 }
 
-export function useChat() {
+/** 历史恢复消息（/sessions/{id}/messages）→ 气泡消息；存档不持久化 sources，恢复后不展示溯源面板 */
+export function toRestoredChatMessages(rows: RestoredMessage[]): ChatMessage[] {
+  return rows.map((m) => ({
+    id: m.message_id,
+    role: m.role === 'user' ? 'user' : 'assistant',
+    kind: m.role === 'user' ? 'normal' : kindForAnswer(m.answer_type),
+    content: m.content,
+    serverMessageId: m.message_id,
+  }));
+}
+
+export interface UseChatOptions {
+  /** 本轮问答结束（含回退链路）后回调：供会话列表刷新 */
+  onTurnEnd?: () => void;
+}
+
+export function useChat(options: UseChatOptions = {}) {
+  const { onTurnEnd } = options;
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [status, setStatus] = useState<ChatStatus>('idle');
-  // 最近提问标题（侧栏 Recents 用：去重、最多保留 10 条，新建会话不清空）
-  const [recents, setRecents] = useState<string[]>([]);
-  // 会话 ID 存 ref：不参与渲染，新建会话时重置
-  const sessionIdRef = useRef<string>(genId('sess'));
+  // 会话 ID 提升为状态：侧栏选中历史会话需高亮当前会话
+  const [sessionId, setSessionId] = useState<string>(() => genId('sess'));
 
   const newSession = useCallback(() => {
     setMessages([]);
     setStatus('idle');
-    sessionIdRef.current = genId('sess');
+    setSessionId(genId('sess'));
+  }, []);
+
+  /** 切换到已持久化的会话：用恢复消息替换当前消息流（调用方负责拉取历史） */
+  const switchTo = useCallback((id: string, restored: ChatMessage[]) => {
+    setStatus('idle');
+    setSessionId(id);
+    setMessages(restored);
   }, []);
 
   const send = useCallback(async (question: string) => {
     const text = question.trim();
     if (!text || status === 'sending') return;
-
-    setRecents((prev) => [text, ...prev.filter((r) => r !== text)].slice(0, 10));
 
     const pendingId = genId('p');
     setMessages((prev) => [
@@ -151,7 +172,7 @@ export function useChat() {
     };
 
     try {
-      await streamChat(text, sessionIdRef.current, {
+      await streamChat(text, sessionId, {
         onMeta: (meta) => {
           // 仅暂存元信息，不切换气泡：sources / answer_type 供首 token 上屏与定稿使用
           answerType = meta.answer_type;
@@ -169,7 +190,7 @@ export function useChat() {
       // 旧版后端无 /chat/stream：回退整包问答，保持功能可用
       if (e instanceof ApiError && e.status === 404 && !streamId) {
         try {
-          const res = await sendChat(text, sessionIdRef.current);
+          const res = await sendChat(text, sessionId);
           answerType = res.answer_type;
           setMessages((prev) => prev.filter((m) => m.id !== pendingId).concat(toAssistantMessage(res)));
           return;
@@ -190,8 +211,10 @@ export function useChat() {
       dropPending(detail);
     } finally {
       setStatus('idle');
+      // 本轮消息已由后端落库（成功或拒答均存档），通知会话列表刷新标题/排序
+      onTurnEnd?.();
     }
-  }, [status]);
+  }, [status, sessionId, onTurnEnd]);
 
-  return { messages, status, recents, sessionId: sessionIdRef.current, send, newSession };
+  return { messages, status, sessionId, send, newSession, switchTo };
 }

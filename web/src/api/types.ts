@@ -5,7 +5,7 @@
 
 export interface ChatRequest {
   question: string;
-  /** 预留：当前后端无状态，前端生成并上送，未来多轮会话直接复用 */
+  /** 会话主键：前端生成并上送，后端按此持久化消息并按上下文引擎压缩多轮历史 */
   session_id?: string | null;
 }
 
@@ -80,6 +80,40 @@ export interface StreamDoneEvent {
 export interface StreamErrorEvent {
   status: number;
   detail: string;
+}
+
+// ---------- L3 会话历史（memory 持久化，src/agent/schemas.py SessionItem/RestoredMessage） ----------
+
+/** GET /sessions 会话列表项：title 取首条用户提问，updated_at 为最近一条消息时间 */
+export interface SessionItem {
+  session_id: string;
+  title: string;
+  updated_at: string | null;
+  message_count: number;
+}
+
+/** 历史恢复的单条可见消息（仅 user/assistant；sources 不随存档持久化） */
+export interface RestoredMessage {
+  message_id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  /** 本轮意图（user 消息携带） */
+  intent: string | null;
+  /** 作答类型（assistant 消息携带，取值同 AnswerType，旧数据可能为 null 或新增枚举） */
+  answer_type: string | null;
+  created_at: string | null;
+}
+
+/** GET /sessions/{session_id}/messages 响应体（按时间升序） */
+export interface SessionMessagesResponse {
+  session_id: string;
+  messages: RestoredMessage[];
+}
+
+/** DELETE /sessions/{session_id} 响应体 */
+export interface DeleteSessionResponse {
+  session_id: string;
+  deleted: boolean;
 }
 
 // ---------- L2 检索服务（预留通道） ----------
