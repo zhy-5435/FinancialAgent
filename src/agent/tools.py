@@ -1,8 +1,9 @@
-"""工具层：将 L2 检索 REST 服务与外部行情源封装为 LangChain 工具，供 Agent / 图节点调用"""
+"""工具层：将 L2 检索 REST 服务、权威信源联网检索与外部行情源封装为 LangChain 工具，供 Agent / 图节点调用"""
 import httpx
 from langchain_core.tools import tool
 
 from src.agent.config import SEARCH_API_BASE, SEARCH_TOP_K
+from src.agent.web_search import search_and_package
 
 
 @tool
@@ -22,6 +23,20 @@ def search_knowledge(query: str, top_k: int = SEARCH_TOP_K) -> list[dict]:
     )
     resp.raise_for_status()
     return resp.json()["results"]
+
+
+@tool
+def web_search(query: str) -> str:
+    """在权威金融信源联网检索并抓取原文。
+
+    信源为白名单内的权威站点：主信源是证监会指定信息披露的财经媒体，
+    政策信源是监管机构、交易所与行业协会官方网站（名单以 config 的
+    WEB_MAIN_SOURCES / WEB_POLICY_SOURCES 为准）。
+    当问题需要时效性信息（最新政策、监管动态、市场行情、数据发布）或知识库未覆盖时调用。
+    仅检索并返回白名单站点内容，每条含站点名、标题、原文链接、发布时间与正文摘录，
+    供作答引用 URL；无命中时返回“（联网未检索到权威信源结果）”。
+    """
+    return search_and_package(query)
 
 
 @tool

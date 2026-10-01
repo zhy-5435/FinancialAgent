@@ -1,7 +1,12 @@
 """L1 数据层专有配置：向量库 Collection、Embedding 模型与检索参数"""
+from src.config import PROJECT_ROOT
 
 MILVUS_COLLECTION = "l1_core_knowledge"
 EMBEDDING_MODEL_NAME = "BAAI/bge-base-zh-v1.5"
+# 本地部署的模型目录（由 HF 缓存经 SentenceTransformer.save() 导出的标准目录）：
+# 存在则优先从本地路径加载，完全不依赖 HuggingFace 缓存位置与网络
+EMBEDDING_MODEL_DIR = PROJECT_ROOT / "models" / "bge-base-zh-v1.5"
+EMBEDDING_MODEL_PATH = str(EMBEDDING_MODEL_DIR) if EMBEDDING_MODEL_DIR.exists() else EMBEDDING_MODEL_NAME
 VECTOR_DIM = 768  # bge-base-zh-v1.5 固定输出维度
 TOP_K = 3         # 默认返回切片数
 

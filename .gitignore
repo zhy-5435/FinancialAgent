@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 .venv/
+.venv1/
 venv/
 
 # IDE 配置
@@ -11,6 +12,9 @@ venv/
 # 构建产物：双库可由 python -m src.build_pipeline 从 Excel 全量重建
 db/
 data/processed/
+
+# 本地模型权重：bge 向量模型可由 HF 缓存经 model.save() 重新导出，不入库
+models/
 
 # 敏感配置：大模型 API Key 等，禁止提交
 .env

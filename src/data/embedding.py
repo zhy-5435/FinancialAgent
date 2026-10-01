@@ -1,7 +1,7 @@
 """BGE 中文向量服务：查询侧加检索指令前缀，文档侧不加"""
 from sentence_transformers import SentenceTransformer
 
-from src.data.config import EMBEDDING_MODEL_NAME
+from src.data.config import EMBEDDING_MODEL_PATH
 
 
 class EmbeddingService:
@@ -13,7 +13,8 @@ class EmbeddingService:
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
-            cls._model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+            # 本地部署目录优先（models/bge-base-zh-v1.5），无本地目录时回退 HF 模型名
+            cls._model = SentenceTransformer(EMBEDDING_MODEL_PATH)
         return cls._instance
 
     def encode_query(self, text: str) -> list[float]:

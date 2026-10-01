@@ -63,7 +63,8 @@ def chat(req: ChatRequest):
     """
     输入问题，先走意图识别（低置信回落 kb_qa），再按分支作答：
     kb_qa 走「L2 检索 → 相似度阈值过滤 → 约束作答/拒答」；chitchat 走通用对话；
-    news_search / quote_query 为占位分支（M3/M4 接入工具后生效）。
+    news_search 走「web_search 白名单网搜索证 → 财经简报生成」（无素材固定话术）；
+    quote_query 为占位分支（M4 接入行情工具后生效）。
     """
     session_id = req.session_id or f"sess-{uuid.uuid4().hex[:12]}"
     started = time.perf_counter()

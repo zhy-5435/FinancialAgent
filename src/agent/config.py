@@ -63,6 +63,52 @@ QUOTE_DISCLAIMER = "行情数据来自第三方公开接口，仅供参考、不
 # 关键词/规则预分类：命中 news/quote/chitchat 直接短路分流、跳过意图 LLM；未命中仍走 LLM
 INTENT_RULES_ENABLED = os.getenv("INTENT_RULES_ENABLED", "true").lower() in ("1", "true", "yes")
 
+# ---------- 联网搜索（权威信源）----------
+# 调用方（后续接入的 Agent / 检索流程）通过 web_search 工具触发联网检索：
+# Tavily Search API 以 include_domains 限定在下列白名单官方域名内检索，
+# 原文打包进 Prompt 并引用 URL；白名单同时用于结果二次过滤，杜绝不可控来源。
+WEB_SEARCH_TIMEOUT = int(os.getenv("WEB_SEARCH_TIMEOUT", "10"))          # 单次 HTTP 超时（秒）
+WEB_SEARCH_MAX_PAGES = int(os.getenv("WEB_SEARCH_MAX_PAGES", "5"))       # 打包进 Prompt 的网页数上限
+WEB_SEARCH_MAX_CHARS = int(os.getenv("WEB_SEARCH_MAX_CHARS", "1500"))    # 每篇正文截断字数
+# Tavily API Key（https://tavily.com 注册获取；未配置时联网搜索优雅降级为空结果）
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "").strip()
+# Tavily 检索深度：basic 快；advanced 正文提取更全（消耗 2 倍额度）
+TAVILY_SEARCH_DEPTH = os.getenv("TAVILY_SEARCH_DEPTH", "advanced")
+# 财经资讯媒体（新闻、解读、快讯，证监会指定信息披露媒体）
+WEB_MAIN_SOURCES = {
+    "中证网": "cs.com.cn",
+    "证券时报网": "stcn.com",
+    "财联社": "cls.cn",
+    "新华财经": "cnfin.com",
+    "上海证券报·中国证券网": "cnstock.com",
+    "证券日报网": "zqrb.cn",
+    "金融时报·中国金融新闻网": "financialnews.com.cn",
+    "经济参考报": "jjckb.cn",
+}
+
+# 政策信源（监管、政府、交易所官方，原文、公告、统计数据）
+WEB_POLICY_SOURCES = {
+    "中国人民银行": "pbc.gov.cn",
+    "中国证监会": "csrc.gov.cn",
+    "国家统计局": "stats.gov.cn",
+    "国家金融监督管理总局": "nfra.gov.cn",
+    "国家外汇管理局": "safe.gov.cn",
+    "中华人民共和国财政部": "mof.gov.cn",
+    "上海证券交易所": "sse.com.cn",
+    "深圳证券交易所": "szse.cn",
+    "北京证券交易所": "bse.cn",
+    "中国金融期货交易所": "cffex.com.cn",
+    "上海期货交易所": "shfe.com.cn",
+    "大连商品交易所": "dce.com.cn",
+    "郑州商品交易所": "czce.com.cn",
+    "广州期货交易所": "gfex.com.cn",
+    "中国证券投资基金业协会": "amac.org.cn",
+    "中国证券业协会": "sac.net.cn",
+    "中国证券登记结算": "chinaclear.cn",
+    "中证指数有限公司": "csindex.com.cn",
+}
+
+
 # ---------- L3 Agent HTTP 服务 ----------
 AGENT_API_HOST = os.getenv("AGENT_API_HOST", "0.0.0.0")
 AGENT_API_PORT = int(os.getenv("AGENT_API_PORT", "8001"))

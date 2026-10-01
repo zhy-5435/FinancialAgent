@@ -4,18 +4,20 @@ import os
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 from pathlib import Path
 
-# 若 BGE 模型已在本地缓存，则强制离线加载：跳过 huggingface_hub 对镜像的逐文件联网校验，
-# 避免镜像缓慢/不可达时首启长时间静默阻塞（表现为运行 pipeline 后控制台空白、一直转圈）。
-# 全新机器无缓存时不置此标志，仍会走上面的镜像正常下载一次。
+# 项目根目录
+PROJECT_ROOT = Path(__file__).parent.parent.resolve()
+
+# 若 BGE 模型已在本地缓存或已部署到项目 models/ 目录，则强制离线加载：跳过
+# huggingface_hub 对镜像的逐文件联网校验，避免镜像缓慢/不可达时首启长时间静默
+# 阻塞（表现为运行 pipeline 后控制台空白、一直转圈）。
+# 全新机器两者均无时不置此标志，仍会走上面的镜像正常下载一次。
 _hf_cache_home = Path(os.getenv("HF_HOME") or (Path.home() / ".cache" / "huggingface"))
 _hub_cache_dir = Path(os.getenv("HUGGINGFACE_HUB_CACHE") or (_hf_cache_home / "hub"))
 _bge_cache_dir = _hub_cache_dir / "models--BAAI--bge-base-zh-v1.5"
-if _bge_cache_dir.exists():
+_project_model_dir = PROJECT_ROOT / "models" / "bge-base-zh-v1.5"
+if _bge_cache_dir.exists() or _project_model_dir.exists():
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-
-# 项目根目录
-PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
 # 数据路径
 DATA_DIR = PROJECT_ROOT / "data"

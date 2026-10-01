@@ -6,7 +6,7 @@
         │       ├─ 有有效切片 → generate（LLM 约束作答，强制溯源）
         │       └─ 无有效切片 → refuse（固定话术拒答，不消耗 LLM 调用）
         ├─ chitchat    → chat_generate（通用对话，无溯源，不消耗检索）
-        ├─ news_search → news_pending（占位话术，M3 接入网搜工具）
+        ├─ news_search → news_generate（web_search 白名单网搜索证 → 财经简报生成；无素材固定话术）
         └─ quote_query → quote_answer（行情工具取数→表格化呈现，不经 LLM，附来源与免责）
 """
 from operator import add
@@ -19,19 +19,21 @@ from src.agent.intent import classify
 from src.agent.llm import llm
 from src.agent.prompts import (
     CHAT_SYSTEM_PROMPT,
-    NEWS_PENDING_ANSWER,
+    NEWS_BRIEF_SYSTEM_PROMPT,
+    NEWS_NO_EVIDENCE_ANSWER,
     REFUSAL_ANSWER,
     SYSTEM_PROMPT,
     format_context,
 )
-from src.agent.tools import search_knowledge, search_realtime_quote
+from src.agent.tools import search_knowledge, search_realtime_quote, web_search
+from src.agent.web_search import EMPTY_RESULT, SOURCE_DESC
 
 
 class QAState(TypedDict):
     question: str                     # 用户问题
     intent: str                       # kb_qa / chitchat / news_search / quote_query
     search_query: str                 # 检索改写查询（缺省回退原问题）
-    symbol: str                       # quote_query 抽取的标的（M4 行情工具消费，M1 暂只透传）
+    symbol: str                       # quote_query 抽取的标的（M4 行情工具消费）
     news_topic: str                   # news_search 抽取的资讯主题（M3 网搜工具消费）
     retrieved: list[dict]             # L2 原始命中切片
     valid_hits: Annotated[list[dict], add]  # 过滤后的有效证据（相似度达标）
@@ -76,9 +78,18 @@ def chat_generate(state: QAState) -> dict:
     return {"answer": response.content, "answer_type": "chatted"}
 
 
-def news_pending(state: QAState) -> dict:
-    """财经资讯分支占位：M3 接入网搜工具后替换为 检索→简报生成 链路"""
-    return {"answer": NEWS_PENDING_ANSWER, "answer_type": "searched"}
+def news_generate(state: QAState) -> dict:
+    """财经资讯分支（M3）：web_search 工具白名单网搜索证 → 财经简报生成
+
+    仅访问权威信源白名单站点拉取原文作素材；无素材（检索为空/全失败）时
+    直接固定话术短路，不消耗作答 LLM 调用。
+    """
+    topic = state["news_topic"] or state["search_query"]
+    evidence = web_search.invoke({"query": topic})
+    if evidence == EMPTY_RESULT:
+        return {"answer": NEWS_NO_EVIDENCE_ANSWER, "answer_type": "searched"}
+    response = llm.invoke(_news_messages(state["question"], evidence))
+    return {"answer": response.content, "answer_type": "searched"}
 
 
 def quote_answer(state: QAState) -> dict:
@@ -118,6 +129,15 @@ def _chat_messages(question: str) -> list[dict]:
     ]
 
 
+def _news_messages(question: str, evidence: str) -> list[dict]:
+    """财经简报分支的消息序列：SYSTEM 注入网搜证据块 + 用户原问题"""
+    prompt = NEWS_BRIEF_SYSTEM_PROMPT.format(web_evidence_blocks=evidence, web_sources=SOURCE_DESC)
+    return [
+        {"role": "system", "content": prompt},
+        {"role": "user", "content": f"用户提问：{question}"},
+    ]
+
+
 def build_graph():
     """构建并编译问答图，返回可 invoke 的 CompiledGraph"""
     graph = StateGraph(QAState)
@@ -126,7 +146,7 @@ def build_graph():
     graph.add_node("generate", generate)
     graph.add_node("refuse", refuse)
     graph.add_node("chat_generate", chat_generate)
-    graph.add_node("news_pending", news_pending)
+    graph.add_node("news_generate", news_generate)
     graph.add_node("quote_answer", quote_answer)
 
     graph.add_edge(START, "classify_intent")
@@ -135,7 +155,7 @@ def build_graph():
         {
             "kb_qa": "retrieve",
             "chitchat": "chat_generate",
-            "news_search": "news_pending",
+            "news_search": "news_generate",
             "quote_query": "quote_answer",
         },
     )
@@ -143,7 +163,7 @@ def build_graph():
         "retrieve", _route_after_retrieve,
         {"generate": "generate", "refuse": "refuse"},
     )
-    for node in ("generate", "refuse", "chat_generate", "news_pending", "quote_answer"):
+    for node in ("generate", "refuse", "chat_generate", "news_generate", "quote_answer"):
         graph.add_edge(node, END)
     return graph.compile()
 
@@ -164,8 +184,10 @@ def ask_detail(question: str) -> dict:
         answer      最终回答文本
         intent      识别意图（kb_qa/chitchat/news_search/quote_query）
         answer_type generated=基于有效切片作答 / refused=无有效证据拒答
-                    / chatted=闲聊对话 / quoted=实时行情快照 / searched=资讯分支占位（M3 生效）
-        sources     有效证据切片列表（非 kb_qa 分支与拒答时为空）
+                    / chatted=闲聊对话 / searched=财经简报（白名单网搜证据生成）
+                    / quoted=实时行情快照（表格化，不经 LLM）
+        sources     有效证据切片列表（非 kb_qa 分支与拒答时为空；
+                    简报来源站点与 URL 已内嵌于回答文本）
     """
     state = qa_graph.invoke({"question": question})
     return {
@@ -180,7 +202,7 @@ def ask_stream(question: str):
     """流式作答生成器：意图路由后按分支产出 meta 事件与增量文本
 
     与 qa_graph 同一套「意图识别 → 分支作答」逻辑，仅为 SSE 输出重排为生成器；
-    refuse / 占位分支不消耗作答 LLM 调用，单次产出固定话术。
+    refuse / 无素材简报 / 行情快照分支不经作答 LLM，单次产出固定或格式化文本。
     事件结构：
         {"event": "meta",  "intent": ..., "answer_type": ..., "sources": [...]}
         {"event": "token", "text": 增量文本}
@@ -201,17 +223,22 @@ def ask_stream(question: str):
     elif intent == "chitchat":
         yield {"event": "meta", "intent": intent, "answer_type": "chatted", "sources": []}
         messages = _chat_messages(question)
-    elif intent == "quote_query":
+    elif intent == "news_search":
+        # 与 news_generate 节点同一链路：白名单网搜索证 → 财经简报生成
+        topic = result.news_topic or question
+        yield {"event": "meta", "intent": intent, "answer_type": "searched", "sources": []}
+        evidence = web_search.invoke({"query": topic})
+        if evidence == EMPTY_RESULT:
+            yield {"event": "token", "text": NEWS_NO_EVIDENCE_ANSWER}
+            return
+        messages = _news_messages(question, evidence)
+    else:
         # 行情分支：工具取数后单帧产出格式化快照（不经 LLM，与图节点同一链路）
         qres = search_realtime_quote.invoke(
             {"symbol": result.symbol or "", "query": question}
         )
         yield {"event": "meta", "intent": intent, "answer_type": "quoted", "sources": []}
         yield {"event": "token", "text": qres["markdown"]}
-        return
-    else:
-        yield {"event": "meta", "intent": intent, "answer_type": "searched", "sources": []}
-        yield {"event": "token", "text": NEWS_PENDING_ANSWER}
         return
 
     for chunk in llm.stream(messages):
