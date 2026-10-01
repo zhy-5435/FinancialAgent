@@ -1,9 +1,10 @@
+"""SQLite 权威主库：建表 / Excel 清洗导入 / 值域校验 / 原始文档路径对账 / 切片详情查询"""
 import sqlite3
 from pathlib import Path
 
 import pandas as pd
 
-from src.config import SQLITE_DB_PATH, EXCEL_PATH, RAW_DATA_DIR
+from src.config import EXCEL_PATH, RAW_DATA_DIR, SQLITE_DB_PATH
 
 # 与《表结构设计》建表语句保持一致的列顺序（Excel 导入、SQL 查询均按此对齐）
 DOC_COLUMNS = [
@@ -165,7 +166,7 @@ class SqliteClient:
     # ---------- 数据导入与查询 ----------
 
     def load_excel_to_db(self):
-        """全量导入Excel数据，覆盖旧数据，个人测试场景下保证数据与Excel一致"""
+        """全量导入 Excel 数据，覆盖旧数据，保证数据与 Excel 权威源一致"""
         df_doc = self._clean_doc_version(pd.read_excel(EXCEL_PATH, sheet_name="doc_version"))
         df_chunk = self._clean_knowledge_chunk(pd.read_excel(EXCEL_PATH, sheet_name="knowledge_chunk"))
         self._validate(df_doc, df_chunk)
@@ -225,7 +226,7 @@ class SqliteClient:
             })
         return report
 
-    def get_valid_knowledge_with_meta(self):
+    def get_valid_knowledge_with_meta(self) -> pd.DataFrame:
         """获取文档与切片双有效的知识切片，携带文档元数据（生效/失效时间），供向量同步使用"""
         conn = self._get_conn()
         query = '''
@@ -243,7 +244,7 @@ class SqliteClient:
         return df
 
     def get_knowledge_detail_by_ids(self, knowledge_ids: list[str]) -> pd.DataFrame:
-        """根据切片ID批量查询完整详情，用于检索后补全信息"""
+        """根据切片 ID 批量查询完整详情，用于检索后补全信息"""
         if not knowledge_ids:
             return pd.DataFrame()
         conn = self._get_conn()
@@ -261,6 +262,7 @@ class SqliteClient:
         df = pd.read_sql(query, conn, params=knowledge_ids)
         conn.close()
         return df
+
 
 # 全局实例
 sqlite_client = SqliteClient()

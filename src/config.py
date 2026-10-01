@@ -1,5 +1,6 @@
+"""全局共享路径配置：数据目录、数据库路径，跨 L1 / L2 / L3 层引用"""
 import os
-# 配置 HuggingFace 国内镜像
+# 配置 HuggingFace 国内镜像（Embedding 模型首次加载时下载）
 os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 from pathlib import Path
 
@@ -16,16 +17,6 @@ DB_DIR = PROJECT_ROOT / "db"
 SQLITE_DB_PATH = DB_DIR / "sqlite" / "l1_core.db"
 MILVUS_DB_PATH = DB_DIR / "milvus" / "l1_milvus.db"
 
-# 向量库配置
-MILVUS_COLLECTION = "l1_core_knowledge"
-EMBEDDING_MODEL_NAME = "BAAI/bge-small-zh-v1.5"
-VECTOR_DIM = 512  # bge-small-zh-v1.5 固定输出维度为512
-TOP_K = 3
-
-# FastAPI 检索服务配置
-API_HOST = "127.0.0.1"
-API_PORT = 8000
-
-# 确保目录存在
-for path in [DATA_DIR, RAW_DATA_DIR, DB_DIR, DB_DIR/"sqlite", DB_DIR/"milvus", DATA_DIR/"excel"]:
-    path.mkdir(parents=True, exist_ok=True)
+# 确保目录存在（首次运行时自动创建）
+for _path in [DATA_DIR, RAW_DATA_DIR, DB_DIR, DB_DIR / "sqlite", DB_DIR / "milvus", DATA_DIR / "excel"]:
+    _path.mkdir(parents=True, exist_ok=True)
