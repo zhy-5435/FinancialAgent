@@ -1,0 +1,110 @@
+## 评估结论
+
+现有项目是一个 **RAG 线性问答链路**（检索 → 过滤 → 生成），与 Claude Code 式的 **多步自治 Agent Loop** 有本质差距。以下逐项评估：
+
+---
+
+### 各方向与现有架构的适配度
+
+| 方向 | 适配度 | 现有基础 | 主要缺口 |
+|---|---|---|---|
+| 1. 安全合规 / 幻觉控制 | **强适配** | 阈值拒答 + 强制溯源提示词 + `answer_type` 二态输出 | 缺少后置验证层（回答中的引用条款是否真实存在于原文）、Prompt Injection 防线、审计日志 |
+| 2. 多工具异步并发 / 限流 / 容错 | **中等适配** | LangGraph 原生支持扇出并行节点；L2/L3 已有独立服务 | 当前单工具单链路；无 circuit breaker / 指数退避重试；LLM 调用无超时控制 |
+| 3. 上下文记忆 / 压缩 / 持久化 | **可平滑扩展** | `session_id` 字段已预留；SQLite 基建可复用；LangGraph 有 checkpointer 机制 | 后端无状态，无历史消息持久化；无对话摘要压缩策略 |
+| 4. 意图识别 / 路由分发 | **需重构 graph** | LangGraph conditional_edges 天然支持多分支路由 | 当前图只有 retrieve→generate/refuse 单链路，无法区分闲聊/检索/分析/工具调用 |
+| 5. 提示词设计 | **强适配** | `prompts.py` 已独立；`format_context()` 模板化 | 无版本管理、无 few-shot、无按意图动态组装 |
+| 6. MCP / Skills / Claude Code Loop | **差距最大** | LangChain `@tool` 注册方式可迁移为 MCP tool | 缺 Agent Loop（plan→act→observe 循环）、缺 Skill 热插拔机制、缺文件系统/代码执行等本地工具 |
+
+---
+
+### 核心差距诊断
+
+现有项目 = **单次 RAG 管道**，Claude Code = **有状态多步 Agent 循环**：
+
+```
+现有：用户问题 → [检索] → [生成/拒答] → 结束
+目标：用户问题 → [意图路由] → [规划] → [工具调用(可并行)] → [观察结果] → [是否继续?] → [综合生成] → 持久化
+```
+
+关键架构缺失：
+1. **没有循环**：LangGraph 当前图无环，一次执行即终止
+2. **没有状态**：多步中间推理结果无处存放（checkpointer 未接入）
+3. **没有工具生态**：仅 `search_knowledge` 一个工具，无文件操作/计算/外部 API
+4. **没有自治决策**：LLM 不参与"下一步该做什么"的决策，只在最后生成文本
+
+---
+
+### 分阶段演进规划
+
+**Phase 1 — 安全加固 + 意图路由（2~3 周）**
+```
+src/agent/
+├── graph.py          → 改造为带 intent_router 节点的分支图
+├── intent.py         → 新增：意图分类器（LLM 轻量判定 or 规则+LLM 混合）
+├── prompts/
+│   ├── __init__.py   → 提示词版本管理
+│   ├── intent.py     → 意图识别 prompt
+│   ├── chat.py       → 闲聊/通用回复 prompt
+│   ├── rag.py        → 现有溯源作答 prompt（迁移）
+│   └── planner.py    → 工具规划 prompt
+└── guard.py          → 新增：后置校验（验证引用存在性）+ 输入过滤
+```
+- 图变为：`START → classify_intent → {chat | retrieve | analyze | tool_plan}`
+- 引入简单的 LLM 调用重试装饰器（3次指数退避）
+
+**Phase 2 — Agent Loop + 多工具并发（3~4 周）**
+```
+src/agent/
+├── graph.py          → 改造为含环的 ReAct / Plan-Execute 循环
+├── state.py          → 定义 AgentState（messages, scratchpad, tool_results, step_count）
+├── tools/
+│   ├── __init__.py   → 工具注册表（动态发现）
+│   ├── search.py     → 现有知识检索
+│   ├── calculator.py → 金融数值计算
+│   ├── file_ops.py   → 文件读写
+│   └── ...
+├── executor.py       → 异步并发工具调用（asyncio.gather + 限流）
+└── limiter.py        → Token Bucket 限流 + 熔断器
+```
+- LangGraph 加入 `should_continue` 条件边回环
+- `executor.py` 用 `asyncio` 实现多工具并行 dispatch，单工具失败不影响其他
+- LLM 作为"规划器"决定每步调用哪些工具、参数如何构造
+
+**Phase 3 — Memory 层 + 会话持久化（2 周）**
+```
+src/agent/
+├── memory/
+│   ├── __init__.py
+│   ├── checkpointer.py   → LangGraph SqliteSaver 接入（多轮状态）
+│   ├── compressor.py     → 对话历史摘要压缩（超 N 轮触发 LLM 总结）
+│   └── store.py          → 问答日志持久化（SQLite conversations 表）
+```
+- `session_id` 从前端上送真正生效：后端按 session 加载历史
+- 压缩策略：保留最近 K 轮原文 + 更早轮次用摘要替代
+
+**Phase 4 — MCP + Skills 扩展（4+ 周）**
+```
+src/agent/
+├── mcp/
+│   ├── server.py         → 将本项目暴露为 MCP Server（search_knowledge 等）
+│   └── client.py         → 连接外部 MCP Server 获取工具
+├── skills/
+│   ├── __init__.py       → Skill 注册与热加载
+│   ├── base.py           → Skill 抽象基类
+│   └── builtin/          → 内置 Skill（知识检索、合规审查等）
+```
+- MCP 让工具生态可插拔，外部开发者按协议贡献工具
+- Skills 比 tools 更高层：多步骤编排 + 条件逻辑 + 提示词打包
+
+---
+
+### 结论
+
+| 维度 | 评价 |
+|---|---|
+| 数据层 | 设计成熟，双库架构、溯源机制可直接复用 |
+| Agent 层 | **仅原型级**（单轮单工具线性图），不具备 Claude Code 式循环能力 |
+| 迁移成本 | Phase 1~2 改动集中在 `src/agent/`，L1/L2 无需变更，风险可控 |
+| 框架适配 | LangGraph 原生支持有环图 + checkpointer + 并行节点，**是正确选择** |
+
+现有项目适合作为 Phase 1 的基础继续演进，但距离"核心设计模仿 Claude Code"至少需要 Phase 2~4 的架构升级——核心差异在于**引入 Agent 循环 + 工具生态 + 有状态记忆**这三件事。

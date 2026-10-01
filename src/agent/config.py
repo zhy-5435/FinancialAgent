@@ -21,4 +21,15 @@ SEARCH_TOP_K = int(os.getenv("SEARCH_TOP_K", "5"))
 
 # ---------- 金融场景可靠性 ----------
 # 相似度低于阈值的切片不作为作答依据；全部低于阈值时明确拒答，禁止编造条款与费率
-SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.5"))
+# 0.4 为 bge-base-zh-v1.5 实测校准值（正例最低 0.4354，沿用 0.5 会误杀正确结果）
+SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.4"))
+
+# ---------- L3 Agent HTTP 服务 ----------
+AGENT_API_HOST = os.getenv("AGENT_API_HOST", "0.0.0.0")
+AGENT_API_PORT = int(os.getenv("AGENT_API_PORT", "8001"))
+# 允许跨域访问前端来源，逗号分隔；生产同域反代时可置空关闭 CORS
+AGENT_CORS_ORIGINS = [
+    o.strip()
+    for o in os.getenv("AGENT_CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",")
+    if o.strip()
+]

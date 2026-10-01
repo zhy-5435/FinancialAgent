@@ -23,7 +23,7 @@ def format_context(hits: list[dict]) -> str:
     for idx, hit in enumerate(hits, start=1):
         clause = hit.get("clause_position") or "无条款号"
         blocks.append(
-            f"[{idx}] 相似度：{hit['similarity']}\n"
+            f"[{idx}] 相似度：{hit['similarity']} | 综合得分：{hit.get('score', '—')}\n"
             f"来源：{hit['doc_name']}（{hit['doc_type']}）| 版本 {hit.get('version') or '未知'} | {clause}\n"
             f"内容：{hit['content']}\n"
             f"原文摘录：{hit['original_text']}"

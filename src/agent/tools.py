@@ -11,7 +11,8 @@ def search_knowledge(query: str, top_k: int = SEARCH_TOP_K) -> list[dict]:
 
     回答任何金融业务问题前必须先调用本工具。返回切片列表，每条含：
     content（语义内容）、original_text（原文摘录）、doc_name / doc_type / version /
-    clause_position / heading_path（溯源信息）、similarity（余弦相似度）。
+    clause_position / heading_path（溯源信息）、similarity（余弦相似度）、
+    keyword_score（关键词得分）、score（综合得分，按综合得分降序）。
     仅返回状态有效且在生效期内的切片。
     """
     resp = httpx.post(

@@ -1,0 +1,37 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 全局基础样式：codex 示例同款浅色基调 */
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-base text-ink font-sans antialiased;
+}
+
+/* 细滚动条：示例 sidebar-scroll 同款（透明轨道 + gray-300 圆角滑块） */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #d1d5db transparent;
+}
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: #d1d5db;
+  border-radius: 3px;
+}
+
+/* 保留回答文本中的换行与段落格式 */
+.prose-answer {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
