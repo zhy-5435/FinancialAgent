@@ -13,14 +13,25 @@
 仅关键词路命中的切片按查询向量补算余弦相似度，保证两路得分口径一致；
 FTS5 不可用时自动退化为纯向量检索，出参统一携带 similarity / keyword_score / score。
 """
-from src.data.config import CANDIDATE_TOP_K, KEYWORD_WEIGHT, TOP_K, VECTOR_WEIGHT
+from src.data.config import (
+    CANDIDATE_TOP_K,
+    KEYWORD_WEIGHT,
+    RERANK_CANDIDATE_K,
+    RERANK_ENABLED,
+    TOP_K,
+    VECTOR_WEIGHT,
+)
 from src.data.milvus_client import milvus_store
+from src.data.reranker import reranker_service
 from src.data.sqlite_client import sqlite_client
 
 
 class HybridRetriever:
     def search(self, query: str, top_k: int = TOP_K) -> list[dict]:
-        """双路混合检索主入口，出参结构兼容原向量检索结果，附加综合得分"""
+        """双路混合检索主入口，出参结构兼容原向量检索结果，附加综合得分
+
+        排序链路：双路召回 → 去重补齐 → 归一化加权排序 → （可选）Reranker 精排 → 截断 Top K。
+        """
         # 1) 双路召回
         vec_hits = milvus_store.search(query, top_k=CANDIDATE_TOP_K)
         kw_hits = sqlite_client.keyword_search(query, top_k=CANDIDATE_TOP_K)
@@ -32,7 +43,7 @@ class HybridRetriever:
                 for h in vec_hits
             ]
             results.sort(key=lambda x: x["score"], reverse=True)
-            return results[:top_k]
+            return self._rerank(query, results, top_k)
 
         # 2) 去重合并：向量路条目补关键词得分，仅关键词路命中的条目补算向量相似度
         kw_score_map = {h["knowledge_id"]: h["keyword_score"] for h in kw_hits}
@@ -65,7 +76,25 @@ class HybridRetriever:
             )
         # 综合得分并列时以原始向量相似度兜底（min-max 为保序线性变换，等价于按原始相似度破平）
         merged.sort(key=lambda x: (x["score"], x["similarity"]), reverse=True)
-        return merged[:top_k]
+        return self._rerank(query, merged, top_k)
+
+    def _rerank(self, query: str, ranked: list[dict], top_k: int) -> list[dict]:
+        """对加权排序后的候选集做 Reranker 精排，再截断 Top K
+
+        仅取排序前 RERANK_CANDIDATE_K 条送交叉编码器逐对打分，按精排得分重排；
+        未开启或模型不可用时原序返回（不额外挂 rerank_score 字段），保证零副作用降级。
+        """
+        if not ranked or not RERANK_ENABLED or not reranker_service.available:
+            return ranked[:top_k]
+        pool = ranked[:RERANK_CANDIDATE_K]
+        scores = reranker_service.scores(query, [h["content"] for h in pool])
+        if not scores:
+            return ranked[:top_k]
+        for h, s in zip(pool, scores):
+            h["rerank_score"] = round(s, 4)
+        # 精排得分为主序，并列时回退加权综合得分兜底
+        pool.sort(key=lambda x: (x["rerank_score"], x["score"]), reverse=True)
+        return pool[:top_k]
 
     @staticmethod
     def _minmax(values: list[float]) -> dict[float, float]:

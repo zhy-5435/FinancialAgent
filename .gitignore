@@ -22,6 +22,7 @@ models/
 
 # 本地测试报告：仅本地保留，不入库
 联网搜索工具测试报告.md
+docs/reranker优化测试报告.md
 
 # 系统与日志
 .DS_Store
