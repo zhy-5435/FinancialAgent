@@ -6,11 +6,21 @@ import { useCallback, useState } from 'react';
 
 import { ApiError } from '../api/client';
 import { sendChat, streamChat } from '../api/agent';
-import type { AnswerType, ChatResponse, RestoredMessage, SourceHit } from '../api/types';
+import type { AnswerType, ChatResponse, RestoredMessage, SourceHit, TraceStep } from '../api/types';
 
 export type MessageRole = 'user' | 'assistant';
 /** normal=正常回答；refused=拒答话术；error=链路错误提示；pending=等待首包骨架；streaming=流式打字中 */
 export type MessageKind = 'normal' | 'refused' | 'error' | 'pending' | 'streaming';
+
+/** Agent Loop 单步过程（归一化 plan / tool 两类，供气泡内时间线渲染） */
+export interface ChatStep {
+  kind: 'plan' | 'tool';
+  text?: string; // plan：模型规划说明（可能为空）
+  tools?: string[]; // plan：本步拟调用的工具名
+  name?: string; // tool：工具名
+  ok?: boolean; // tool：是否成功
+  summary?: string; // tool：结果摘要
+}
 
 export interface ChatMessage {
   id: string;
@@ -18,6 +28,7 @@ export interface ChatMessage {
   kind: MessageKind;
   content: string;
   sources?: SourceHit[];
+  steps?: ChatStep[];
   elapsedMs?: number;
   serverMessageId?: string;
 }
@@ -37,6 +48,16 @@ function kindForAnswer(answerType: AnswerType | string | null): MessageKind {
   return answerType === 'refused' ? 'refused' : 'normal';
 }
 
+/** 后端 REST 轨迹 TraceStep[] → UI ChatStep[]（/chat 回退链路用；流式由 plan/step 事件增量累积） */
+function fromTrace(steps?: TraceStep[]): ChatStep[] | undefined {
+  if (!steps || steps.length === 0) return undefined;
+  return steps.map((s) =>
+    s.type === 'plan'
+      ? { kind: 'plan' as const, text: s.text, tools: s.tool_calls.map((c) => c.name) }
+      : { kind: 'tool' as const, name: s.name, ok: s.ok, summary: s.summary },
+  );
+}
+
 /** 后端成功响应 → 助手消息 */
 function toAssistantMessage(res: ChatResponse): ChatMessage {
   return {
@@ -45,6 +66,7 @@ function toAssistantMessage(res: ChatResponse): ChatMessage {
     kind: kindForAnswer(res.answer_type),
     content: res.answer,
     sources: res.sources,
+    steps: fromTrace(res.steps),
     elapsedMs: res.elapsed_ms,
     serverMessageId: res.message_id,
   };
@@ -104,6 +126,7 @@ export function useChat(options: UseChatOptions = {}) {
     let answerType: AnswerType = 'generated';
     let sources: SourceHit[] = [];
     let serverMessageId: string | undefined;
+    let steps: ChatStep[] = []; // Agent Loop 过程轨迹（plan/step 事件增量累积）
     let rendered = ''; // 已上屏文本
     let pendingBuf = ''; // 本帧新增增量
     let raf = 0;
@@ -116,10 +139,17 @@ export function useChat(options: UseChatOptions = {}) {
       setMessages((prev) =>
         prev.map((m) =>
           m.id === pendingId
-            ? { ...m, id: sid, role: 'assistant', kind: 'streaming', content: '', sources }
+            ? { ...m, id: sid, role: 'assistant', kind: 'streaming', content: '', sources, steps }
             : m,
         ),
       );
+    };
+
+    /** 追加一条过程轨迹并实时刷到当前气泡（pending 或 streaming） */
+    const pushStep = (step: ChatStep) => {
+      steps = [...steps, step];
+      const target = streamId ?? pendingId;
+      setMessages((prev) => prev.map((m) => (m.id === target ? { ...m, steps } : m)));
     };
 
     const flush = () => {
@@ -154,6 +184,7 @@ export function useChat(options: UseChatOptions = {}) {
                 kind: kindForAnswer(answerType),
                 content: rendered,
                 sources,
+                steps,
                 elapsedMs,
                 serverMessageId,
               }
@@ -179,6 +210,10 @@ export function useChat(options: UseChatOptions = {}) {
           sources = meta.sources;
           serverMessageId = meta.message_id;
         },
+        onPlan: (plan) =>
+          pushStep({ kind: 'plan', text: plan.text, tools: plan.tools.map((t) => t.name) }),
+        onStep: (step) =>
+          pushStep({ kind: 'tool', name: step.name, ok: step.ok, summary: step.summary }),
         onToken: ({ text: token }) => {
           ensureStreamBubble(); // 首 token 到达才把「正在检索…」换成流式打字气泡
           pendingBuf += token;

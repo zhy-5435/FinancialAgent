@@ -50,9 +50,10 @@ class ChatResponse(BaseModel):
     message_id: str = Field(..., description="本次回答唯一 ID，供后续反馈/追溯扩展")
     question: str = Field(..., description="回显用户问题")
     answer: str = Field(..., description="回答文本（带溯源）、闲聊回复、拒答或占位话术")
-    intent: IntentName = Field(..., description="识别意图：kb_qa=知识库问答；chitchat=闲聊/常识；news_search=财经资讯（白名单网搜简报）；quote_query=实时行情（已接入新浪实时数据源）；低置信度回落 kb_qa")
-    answer_type: str = Field(..., description="generated=基于有效切片作答；refused=无有效证据拒答；chatted=闲聊/常识对话；searched=财经简报（白名单网搜证据生成，无素材时为固定话术）；quoted=实时行情快照（表格化，含来源与免责，不经 LLM 转写）")
+    intent: IntentName = Field(..., description="识别意图：kb_qa=知识库问答；chitchat=闲聊/常识；news_search=财经资讯（白名单网搜简报）；quote_query=实时行情（已接入新浪实时数据源）；Agent Loop 下由本轮实际调用的工具回溯派生")
+    answer_type: str = Field(..., description="generated=基于有效切片作答；refused=无有效证据拒答；chatted=闲聊/常识对话；searched=财经简报（白名单网搜证据生成，无素材时为固定话术）；quoted=实时行情快照（表格化，含来源与免责，不经 LLM 转写）；agentic=多工具组合的自主循环作答")
     sources: list[SourceHit] = Field(default_factory=list, description="作答依据切片列表，非 kb_qa 分支与拒答时为空")
+    steps: list[dict] | None = Field(None, description="Agent Loop 过程轨迹（plan / tool_result 事件序列），供前端展示推理过程；缺省不下发")
     elapsed_ms: int = Field(..., description="本次问答耗时（毫秒）")
 
 

@@ -18,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from src.agent.config import AGENT_CORS_ORIGINS, SEARCH_API_BASE
-from src.agent.graph import ask_detail, ask_stream
+from src.agent.graph import aask_detail, aask_stream
 from src.agent.schemas import (
     ChatRequest,
     ChatResponse,
@@ -34,11 +34,12 @@ from src.memory.memory_manager import memory_manager
 app = FastAPI(
     title="L3 金融助手问答服务",
     description=(
-        "L3 Agent 应用层：LangGraph 编排「意图识别 → 四路分发（知识库问答/闲聊/财经资讯/实时行情）」 "
-        "流程的 REST 接口；知识库分支回答仅基于 L1 有效切片并强制溯源，"
-        "低置信意图回落知识库分支，供 Web 前端与上层应用调用。"
+        "L3 Agent 应用层：LangGraph 编排「统一 Agent Loop（plan → act 并发工具 → observe → "
+        "replan | answer）」流程的 REST 接口；LLM 经 bind_tools 自主选择知识库检索/联网资讯/实时行情工具，"
+        "受步数与墙钟预算约束；知识库分支强制溯源、无有效证据拒答，行情数字逐字不转写，"
+        "供 Web 前端与上层应用调用。"
     ),
-    version="1.1.0",
+    version="2.0.0",
 )
 
 if AGENT_CORS_ORIGINS:
@@ -65,18 +66,17 @@ def health():
     }
 
 
-@app.post("/chat", response_model=ChatResponse, summary="意图路由问答")
-def chat(req: ChatRequest):
+@app.post("/chat", response_model=ChatResponse, summary="Agent Loop 问答")
+async def chat(req: ChatRequest):
     """
-    输入问题，先走意图识别（低置信回落 kb_qa），再按分支作答：
-    kb_qa 走「L2 检索 → 相似度阈值过滤 → 约束作答/拒答」；chitchat 走通用对话；
-    news_search 走「web_search 白名单网搜索证 → 财经简报生成」（无素材固定话术）；
-    quote_query 为占位分支（M4 接入行情工具后生效）。
+    统一 Agent Loop（plan → act 并发工具 → observe → replan | answer）问答入口：
+    LLM 经 bind_tools 自主选择工具（知识库检索 / 联网资讯 / 实时行情），受步数与墙钟预算约束；
+    知识库结论强制溯源、无有效证据拒答、行情数字逐字不转写。intent 由实际调用的工具回溯派生。
     """
     session_id = req.session_id or f"sess-{uuid.uuid4().hex[:12]}"
     started = time.perf_counter()
     try:
-        result = ask_detail(req.question, session_id)
+        result = await aask_detail(req.question, session_id)
     except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError) as e:
         raise HTTPException(
             status_code=502,
@@ -93,6 +93,7 @@ def chat(req: ChatRequest):
         intent=result["intent"],
         answer_type=result["answer_type"],
         sources=result["sources"],
+        steps=result.get("steps"),
         elapsed_ms=int((time.perf_counter() - started) * 1000),
     )
 
@@ -102,12 +103,14 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-@app.post("/chat/stream", summary="意图路由问答（SSE 流式）")
-def chat_stream(req: ChatRequest):
+@app.post("/chat/stream", summary="Agent Loop 问答（SSE 流式）")
+async def chat_stream(req: ChatRequest):
     """
-    与 POST /chat 同一问答链路，按 SSE 事件流输出（供前端 fetch + ReadableStream 消费）：
-        meta   分支就绪后即推送：intent + answer_type + sources + session_id/message_id（前端可先渲染溯源面板）
-        token  LLM 增量文本（拒答/占位分支为单条固定话术）
+    与 POST /chat 同一 Agent Loop 链路，按 SSE 事件流输出（供前端 fetch + ReadableStream 消费）：
+        plan   规划步（LLM 决定调用哪些工具）：step / text / tools（新增过程事件，旧前端可忽略）
+        step   单个工具执行结果：name / ok / summary（新增过程事件）
+        meta   终答就绪即推送：intent + answer_type + sources + session_id/message_id
+        token  终答文本分片（拒答/行情/无素材为定稿文本分片）
         done   正常结束：elapsed_ms
         error  链路异常：detail（如 L2 不可用，对应 502 语义）
     """
@@ -115,10 +118,11 @@ def chat_stream(req: ChatRequest):
     message_id = f"msg-{uuid.uuid4().hex[:12]}"
     started = time.perf_counter()
 
-    def gen():
+    async def gen():
         try:
-            for ev in ask_stream(req.question, session_id):
-                if ev["event"] == "meta":
+            async for ev in aask_stream(req.question, session_id):
+                etype = ev["event"]
+                if etype == "meta":
                     yield _sse("meta", {
                         "session_id": session_id,
                         "message_id": message_id,
@@ -127,8 +131,12 @@ def chat_stream(req: ChatRequest):
                         "answer_type": ev["answer_type"],
                         "sources": ev["sources"],
                     })
-                else:
+                elif etype == "token":
                     yield _sse("token", {"text": ev["text"]})
+                elif etype == "plan":
+                    yield _sse("plan", {"step": ev["step"], "text": ev["text"], "tools": ev["tools"]})
+                elif etype == "step":
+                    yield _sse("step", {"name": ev["name"], "ok": ev["ok"], "summary": ev["summary"]})
             yield _sse("done", {"elapsed_ms": int((time.perf_counter() - started) * 1000)})
         except (httpx.ConnectError, httpx.TimeoutException, httpx.HTTPStatusError) as e:
             yield _sse("error", {"status": 502, "detail": (

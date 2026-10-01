@@ -63,6 +63,29 @@ QUOTE_DISCLAIMER = "行情数据来自第三方公开接口，仅供参考、不
 # 关键词/规则预分类：命中 news/quote/chitchat 直接短路分流、跳过意图 LLM；未命中仍走 LLM
 INTENT_RULES_ENABLED = os.getenv("INTENT_RULES_ENABLED", "true").lower() in ("1", "true", "yes")
 
+# ---------- Agent Loop（统一自主循环） ----------
+# 循环最大步数（reason→act→observe 一轮记 1 步）；=1 近似旧单轮，作应急降级
+AGENT_MAX_STEPS = int(os.getenv("AGENT_MAX_STEPS", "5"))
+# 整轮墙钟上限（秒）：超限则 finalize 输出部分结论 + 未完成声明，杜绝无限循环
+AGENT_LOOP_TIMEOUT_SECONDS = float(os.getenv("AGENT_LOOP_TIMEOUT_SECONDS", "60"))
+# 整轮 token 预算（0=不限，预留）
+AGENT_TOKEN_BUDGET = int(os.getenv("AGENT_TOKEN_BUDGET", "0"))
+# Agent Loop 总开关：true=走统一自主循环；false=应急回退到「一步内按意图预过滤工具」的近单轮形态
+AGENT_LOOP_ENABLED = os.getenv("AGENT_LOOP_ENABLED", "true").lower() in ("1", "true", "yes")
+
+# ---------- 工具层容错（超时 / 重试 / 熔断） ----------
+# 分工具硬超时（秒）：知识库检索复用 L2 网络调用、网搜复用 WEB_SEARCH_TIMEOUT、行情复用 QUOTE_TIMEOUT_SECONDS
+TOOL_TIMEOUT_KB = float(os.getenv("TOOL_TIMEOUT_KB", "30"))
+TOOL_TIMEOUT_WEB = float(os.getenv("TOOL_TIMEOUT_WEB", str(int(os.getenv("WEB_SEARCH_TIMEOUT", "10")) * 2)))
+TOOL_TIMEOUT_QUOTE = float(os.getenv("TOOL_TIMEOUT_QUOTE", str(os.getenv("QUOTE_TIMEOUT_SECONDS", "10"))))
+# 单次工具调用失败后的最大重试次数（不含首次尝试）
+TOOL_MAX_RETRIES = int(os.getenv("TOOL_MAX_RETRIES", "1"))
+# 指数退避基数（秒），第 n 次重试等待 base * 2**n + 抖动
+TOOL_RETRY_BASE_SECONDS = float(os.getenv("TOOL_RETRY_BASE_SECONDS", "0.5"))
+# 熔断：连续失败达阈值打开，打开后 reset 秒内直接返回「工具不可用」观测，到期转半开探活
+BREAKER_FAILURE_THRESHOLD = int(os.getenv("BREAKER_FAILURE_THRESHOLD", "3"))
+BREAKER_RESET_SECONDS = float(os.getenv("BREAKER_RESET_SECONDS", "20"))
+
 # ---------- 联网搜索（权威信源）----------
 # 调用方（后续接入的 Agent / 检索流程）通过 web_search 工具触发联网检索：
 # Tavily Search API 以 include_domains 限定在下列白名单官方域名内检索，

@@ -10,6 +10,8 @@ import type {
   StreamDoneEvent,
   StreamErrorEvent,
   StreamMetaEvent,
+  StreamPlanEvent,
+  StreamStepEvent,
   StreamTokenEvent,
 } from './types';
 
@@ -49,11 +51,13 @@ export function sendChat(question: string, sessionId?: string | null): Promise<C
   });
 }
 
-/** 流式问答回调：meta 先到（可渲染溯源），token 逐个到达，done 收尾 */
+/** 流式问答回调：meta 先到（可渲染溯源），token 逐个到达，done 收尾；plan/step 为 Agent Loop 过程事件（可选） */
 export interface ChatStreamHandlers {
   onMeta: (e: StreamMetaEvent) => void;
   onToken: (e: StreamTokenEvent) => void;
   onDone: (e: StreamDoneEvent) => void;
+  onPlan?: (e: StreamPlanEvent) => void;
+  onStep?: (e: StreamStepEvent) => void;
 }
 
 export function streamChat(
@@ -73,6 +77,12 @@ export function streamChat(
           break;
         case 'token':
           handlers.onToken(data as StreamTokenEvent);
+          break;
+        case 'plan':
+          handlers.onPlan?.(data as StreamPlanEvent);
+          break;
+        case 'step':
+          handlers.onStep?.(data as StreamStepEvent);
           break;
         case 'done':
           handlers.onDone(data as StreamDoneEvent);

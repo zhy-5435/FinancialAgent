@@ -31,11 +31,16 @@ export interface SourceHit {
   score: number;
 }
 
-/** 识别意图：与后端 src/agent/intent.py 的 IntentName 同源；低置信度回落 kb_qa */
+/** 识别意图：与后端 src/agent/intent.py 的 IntentName 同源；Agent Loop 下由实际调用工具回溯派生 */
 export type Intent = 'kb_qa' | 'chitchat' | 'news_search' | 'quote_query';
 
-/** 作答类型：generated/refused=知识库分支；chatted=闲聊；searched=财经简报（白名单网搜证据生成，无素材时为固定话术）；quoted=实时行情快照（表格化含来源免责，不经 LLM 转写） */
-export type AnswerType = 'generated' | 'refused' | 'chatted' | 'searched' | 'quoted';
+/** 作答类型：generated/refused=知识库分支；chatted=闲聊；searched=财经简报；quoted=实时行情快照；agentic=多工具组合的自主循环作答 */
+export type AnswerType = 'generated' | 'refused' | 'chatted' | 'searched' | 'quoted' | 'agentic';
+
+/** Agent Loop 过程轨迹单条（与后端 graph state.trace 元素同源，REST 层 /chat 的 steps 字段） */
+export type TraceStep =
+  | { type: 'plan'; step: number; text: string; tool_calls: { name: string; args: Record<string, unknown> }[] }
+  | { type: 'tool_result'; step: number; name: string; ok: boolean; summary: string };
 
 export interface ChatResponse {
   session_id: string;
@@ -45,6 +50,8 @@ export interface ChatResponse {
   intent: Intent;
   answer_type: AnswerType;
   sources: SourceHit[];
+  /** Agent Loop 过程轨迹（旧后端无此字段时为 undefined，向后兼容） */
+  steps?: TraceStep[];
   elapsed_ms: number;
 }
 
@@ -69,6 +76,20 @@ export interface StreamMetaEvent {
 /** event: token —— LLM 增量文本，拒答/占位分支为单条固定话术 */
 export interface StreamTokenEvent {
   text: string;
+}
+
+/** event: plan —— Agent Loop 规划步（LLM 决定调用哪些工具），过程事件 */
+export interface StreamPlanEvent {
+  step: number;
+  text: string;
+  tools: { name: string; args: Record<string, unknown> }[];
+}
+
+/** event: step —— Agent Loop 单个工具执行结果，过程事件 */
+export interface StreamStepEvent {
+  name: string;
+  ok: boolean;
+  summary: string;
 }
 
 /** event: done —— 正常结束 */
