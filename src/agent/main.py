@@ -1,4 +1,4 @@
-"""金融助手 CLI 入口：命令行多轮问答（每次独立检索，无历史会话）
+"""金融助手 CLI 入口：命令行多轮问答（每次独立意图路由与检索，无历史会话）
 
 启动方式（项目根目录执行，需先启动 L2 检索服务）：
     python -m src.agent.main
@@ -14,7 +14,7 @@ def main():
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8")
 
-    print("金融助手已就绪（输入 q 退出）。回答仅基于 L1 知识库命中切片并强制溯源。")
+    print("金融助手已就绪（输入 q 退出）。知识库问题基于 L1 命中切片作答并强制溯源，其余问题按意图分流回答。")
     while True:
         try:
             question = input("\n用户问题：").strip()

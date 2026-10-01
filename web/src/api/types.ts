@@ -27,17 +27,22 @@ export interface SourceHit {
   similarity: number;
   /** 关键词得分（BM25 归一化到 [0,1]） */
   keyword_score: number;
-  /** 综合得分 = 相似度×0.7 + 关键词得分×0.3 */
+  /** 综合得分 = 归一化向量相似度×0.8 + 归一化关键词得分×0.2（两路得分各做 min-max 归一化后加权，网格搜索调优选定） */
   score: number;
 }
 
-export type AnswerType = 'generated' | 'refused';
+/** 识别意图：与后端 src/agent/intent.py 的 IntentName 同源；低置信度回落 kb_qa */
+export type Intent = 'kb_qa' | 'chitchat' | 'news_search' | 'quote_query';
+
+/** 作答类型：generated/refused=知识库分支；chatted=闲聊；searched/quoted=资讯·行情分支（M1 阶段为占位话术，M3/M4 接入工具后生效） */
+export type AnswerType = 'generated' | 'refused' | 'chatted' | 'searched' | 'quoted';
 
 export interface ChatResponse {
   session_id: string;
   message_id: string;
   question: string;
   answer: string;
+  intent: Intent;
   answer_type: AnswerType;
   sources: SourceHit[];
   elapsed_ms: number;
@@ -51,16 +56,17 @@ export interface AgentHealth {
 
 // ---------- L3 SSE 流式问答事件（POST /chat/stream，与 ChatResponse 契约同源） ----------
 
-/** event: meta —— 检索完成即到达，携带作答类型与溯源切片（可先于正文渲染溯源面板） */
+/** event: meta —— 分支就绪即到达，携带意图、作答类型与溯源切片（可先于正文渲染溯源面板） */
 export interface StreamMetaEvent {
   session_id: string;
   message_id: string;
   question: string;
+  intent: Intent;
   answer_type: AnswerType;
   sources: SourceHit[];
 }
 
-/** event: token —— LLM 增量文本，拒答分支为单条固定话术 */
+/** event: token —— LLM 增量文本，拒答/占位分支为单条固定话术 */
 export interface StreamTokenEvent {
   text: string;
 }

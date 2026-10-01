@@ -27,10 +27,11 @@ from src.agent.schemas import ChatRequest, ChatResponse
 app = FastAPI(
     title="L3 金融助手问答服务",
     description=(
-        "L3 Agent 应用层：LangGraph 编排「L2 检索 → 相似度过滤 → 约束作答/拒答」流程的 "
-        "REST 接口，回答仅基于 L1 知识库有效切片并强制溯源，供 Web 前端与上层应用调用。"
+        "L3 Agent 应用层：LangGraph 编排「意图识别 → 四路分发（知识库问答/闲聊/财经资讯/实时行情）」 "
+        "流程的 REST 接口；知识库分支回答仅基于 L1 有效切片并强制溯源，"
+        "低置信意图回落知识库分支，供 Web 前端与上层应用调用。"
     ),
-    version="1.0.0",
+    version="1.1.0",
 )
 
 if AGENT_CORS_ORIGINS:
@@ -57,11 +58,12 @@ def health():
     }
 
 
-@app.post("/chat", response_model=ChatResponse, summary="知识库问答")
+@app.post("/chat", response_model=ChatResponse, summary="意图路由问答")
 def chat(req: ChatRequest):
     """
-    输入问题，走问答图：L2 检索命中切片 → 按相似度阈值过滤 →
-    有有效证据则 LLM 约束作答（附溯源），否则返回固定拒答话术。
+    输入问题，先走意图识别（低置信回落 kb_qa），再按分支作答：
+    kb_qa 走「L2 检索 → 相似度阈值过滤 → 约束作答/拒答」；chitchat 走通用对话；
+    news_search / quote_query 为占位分支（M3/M4 接入工具后生效）。
     """
     session_id = req.session_id or f"sess-{uuid.uuid4().hex[:12]}"
     started = time.perf_counter()
@@ -80,6 +82,7 @@ def chat(req: ChatRequest):
         message_id=f"msg-{uuid.uuid4().hex[:12]}",
         question=req.question,
         answer=result["answer"],
+        intent=result["intent"],
         answer_type=result["answer_type"],
         sources=result["sources"],
         elapsed_ms=int((time.perf_counter() - started) * 1000),
@@ -91,12 +94,12 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
-@app.post("/chat/stream", summary="知识库问答（SSE 流式）")
+@app.post("/chat/stream", summary="意图路由问答（SSE 流式）")
 def chat_stream(req: ChatRequest):
     """
     与 POST /chat 同一问答链路，按 SSE 事件流输出（供前端 fetch + ReadableStream 消费）：
-        meta   检索完成后即推送：answer_type + sources + session_id/message_id（前端可先渲染溯源面板）
-        token  LLM 增量文本（拒答分支为单条固定话术）
+        meta   分支就绪后即推送：intent + answer_type + sources + session_id/message_id（前端可先渲染溯源面板）
+        token  LLM 增量文本（拒答/占位分支为单条固定话术）
         done   正常结束：elapsed_ms
         error  链路异常：detail（如 L2 不可用，对应 502 语义）
     """
@@ -112,6 +115,7 @@ def chat_stream(req: ChatRequest):
                         "session_id": session_id,
                         "message_id": message_id,
                         "question": req.question,
+                        "intent": ev["intent"],
                         "answer_type": ev["answer_type"],
                         "sources": ev["sources"],
                     })

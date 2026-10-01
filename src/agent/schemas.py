@@ -1,7 +1,11 @@
 """L3 Agent HTTP 服务请求 / 响应模型"""
 from pydantic import BaseModel, Field
+from typing import Literal
 
 MAX_QUESTION_LEN = 500
+
+# 意图枚举：与 src/agent/intent.py 的 IntentName 保持同一组取值
+IntentName = Literal["kb_qa", "chitchat", "news_search", "quote_query"]
 
 
 class ChatRequest(BaseModel):
@@ -45,7 +49,8 @@ class ChatResponse(BaseModel):
     session_id: str = Field(..., description="会话 ID（请求缺省时由服务端生成）")
     message_id: str = Field(..., description="本次回答唯一 ID，供后续反馈/追溯扩展")
     question: str = Field(..., description="回显用户问题")
-    answer: str = Field(..., description="回答文本（带溯源）或固定拒答话术")
-    answer_type: str = Field(..., description="generated=基于有效切片作答；refused=无有效证据拒答")
-    sources: list[SourceHit] = Field(default_factory=list, description="作答依据切片列表，拒答时为空")
+    answer: str = Field(..., description="回答文本（带溯源）、闲聊回复、拒答或占位话术")
+    intent: IntentName = Field(..., description="识别意图：kb_qa=知识库问答；chitchat=闲聊/常识；news_search=财经资讯（M3 接入前为占位）；quote_query=实时行情（M4 接入前为占位）；低置信度回落 kb_qa")
+    answer_type: str = Field(..., description="generated=基于有效切片作答；refused=无有效证据拒答；chatted=闲聊/常识对话；searched=财经资讯分支（M1 阶段为占位话术，M3 接入后为简报回答）；quoted=实时行情分支（M1 阶段为占位话术，M4 接入后为行情数据）")
+    sources: list[SourceHit] = Field(default_factory=list, description="作答依据切片列表，非 kb_qa 分支与拒答时为空")
     elapsed_ms: int = Field(..., description="本次问答耗时（毫秒）")
