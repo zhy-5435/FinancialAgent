@@ -51,6 +51,15 @@ SIMILARITY_THRESHOLD = float(os.getenv("SIMILARITY_THRESHOLD", "0.4"))
 # 分类置信度低于阈值的非 kb_qa 意图一律回落知识库分支（保留现有拒答底线，宁可拒答不乱分流）
 INTENT_CONFIDENCE_THRESHOLD = float(os.getenv("INTENT_CONFIDENCE_THRESHOLD", "0.6"))
 
+# ---------- 实时行情工具（M4） ----------
+# 行情接口硬超时（秒）：单标的直连正常 <1s，超时即降级，不阻断其他分支
+QUOTE_TIMEOUT_SECONDS = float(os.getenv("QUOTE_TIMEOUT_SECONDS", "10"))
+# 错名/错别字 LLM 推断命中阈值：低于该值视为猜不准，走未识别话术而非强行作答
+QUOTE_FUZZY_MIN_CONFIDENCE = float(os.getenv("QUOTE_FUZZY_MIN_CONFIDENCE", "0.6"))
+# 行情数据源与免责固定话术（按要求必须注明来源且不得加 LLM 生成）
+QUOTE_SOURCE_NAME = "新浪财经公开行情接口（hq.sinajs.cn 实时快照）"
+QUOTE_DISCLAIMER = "行情数据来自第三方公开接口，仅供参考、不构成任何投资建议，可能有延迟，请以交易所公布数据为准；本条回答非 L1 知识库权威内容。"
+
 # 关键词/规则预分类：命中 news/quote/chitchat 直接短路分流、跳过意图 LLM；未命中仍走 LLM
 INTENT_RULES_ENABLED = os.getenv("INTENT_RULES_ENABLED", "true").lower() in ("1", "true", "yes")
 

@@ -28,12 +28,20 @@ function genId(prefix: string): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
 }
 
+/**
+ * answer_type → 气泡样式：拒答弱化样式仅限知识库低置信拒答（refused），
+ * 闲聊（chatted）、行情（quoted）、资讯占位（searched）等均按正常回答展示
+ */
+function kindForAnswer(answerType: AnswerType): MessageKind {
+  return answerType === 'refused' ? 'refused' : 'normal';
+}
+
 /** 后端成功响应 → 助手消息 */
 function toAssistantMessage(res: ChatResponse): ChatMessage {
   return {
     id: genId('m'),
     role: 'assistant',
-    kind: res.answer_type === 'generated' ? 'normal' : 'refused',
+    kind: kindForAnswer(res.answer_type),
     content: res.answer,
     sources: res.sources,
     elapsedMs: res.elapsed_ms,
@@ -122,7 +130,7 @@ export function useChat() {
           m.id === sid
             ? {
                 ...m,
-                kind: answerType === 'generated' ? 'normal' : 'refused',
+                kind: kindForAnswer(answerType),
                 content: rendered,
                 sources,
                 elapsedMs,

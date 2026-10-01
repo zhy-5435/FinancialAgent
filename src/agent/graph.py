@@ -7,7 +7,7 @@
         │       └─ 无有效切片 → refuse（固定话术拒答，不消耗 LLM 调用）
         ├─ chitchat    → chat_generate（通用对话，无溯源，不消耗检索）
         ├─ news_search → news_pending（占位话术，M3 接入网搜工具）
-        └─ quote_query → quote_pending（占位话术，M4 接入行情工具）
+        └─ quote_query → quote_answer（行情工具取数→表格化呈现，不经 LLM，附来源与免责）
 """
 from operator import add
 from typing import Annotated, TypedDict
@@ -20,12 +20,11 @@ from src.agent.llm import llm
 from src.agent.prompts import (
     CHAT_SYSTEM_PROMPT,
     NEWS_PENDING_ANSWER,
-    QUOTE_PENDING_ANSWER,
     REFUSAL_ANSWER,
     SYSTEM_PROMPT,
     format_context,
 )
-from src.agent.tools import search_knowledge
+from src.agent.tools import search_knowledge, search_realtime_quote
 
 
 class QAState(TypedDict):
@@ -82,9 +81,12 @@ def news_pending(state: QAState) -> dict:
     return {"answer": NEWS_PENDING_ANSWER, "answer_type": "searched"}
 
 
-def quote_pending(state: QAState) -> dict:
-    """实时行情分支占位：M4 接入行情工具后替换为 get_quote→结构化呈现 链路"""
-    return {"answer": QUOTE_PENDING_ANSWER, "answer_type": "quoted"}
+def quote_answer(state: QAState) -> dict:
+    """实时行情分支：行情工具取数并格式化（数字不经 LLM 转写，失败降级为固定话术）"""
+    result = search_realtime_quote.invoke(
+        {"symbol": state["symbol"], "query": state["question"]}
+    )
+    return {"answer": result["markdown"], "answer_type": "quoted"}
 
 
 # ---------- 路由 ----------
@@ -125,7 +127,7 @@ def build_graph():
     graph.add_node("refuse", refuse)
     graph.add_node("chat_generate", chat_generate)
     graph.add_node("news_pending", news_pending)
-    graph.add_node("quote_pending", quote_pending)
+    graph.add_node("quote_answer", quote_answer)
 
     graph.add_edge(START, "classify_intent")
     graph.add_conditional_edges(
@@ -134,14 +136,14 @@ def build_graph():
             "kb_qa": "retrieve",
             "chitchat": "chat_generate",
             "news_search": "news_pending",
-            "quote_query": "quote_pending",
+            "quote_query": "quote_answer",
         },
     )
     graph.add_conditional_edges(
         "retrieve", _route_after_retrieve,
         {"generate": "generate", "refuse": "refuse"},
     )
-    for node in ("generate", "refuse", "chat_generate", "news_pending", "quote_pending"):
+    for node in ("generate", "refuse", "chat_generate", "news_pending", "quote_answer"):
         graph.add_edge(node, END)
     return graph.compile()
 
@@ -162,7 +164,7 @@ def ask_detail(question: str) -> dict:
         answer      最终回答文本
         intent      识别意图（kb_qa/chitchat/news_search/quote_query）
         answer_type generated=基于有效切片作答 / refused=无有效证据拒答
-                    / chatted=闲聊对话 / searched·quoted=待建分支占位（M3/M4 生效）
+                    / chatted=闲聊对话 / quoted=实时行情快照 / searched=资讯分支占位（M3 生效）
         sources     有效证据切片列表（非 kb_qa 分支与拒答时为空）
     """
     state = qa_graph.invoke({"question": question})
@@ -199,11 +201,17 @@ def ask_stream(question: str):
     elif intent == "chitchat":
         yield {"event": "meta", "intent": intent, "answer_type": "chatted", "sources": []}
         messages = _chat_messages(question)
+    elif intent == "quote_query":
+        # 行情分支：工具取数后单帧产出格式化快照（不经 LLM，与图节点同一链路）
+        qres = search_realtime_quote.invoke(
+            {"symbol": result.symbol or "", "query": question}
+        )
+        yield {"event": "meta", "intent": intent, "answer_type": "quoted", "sources": []}
+        yield {"event": "token", "text": qres["markdown"]}
+        return
     else:
-        pending = NEWS_PENDING_ANSWER if intent == "news_search" else QUOTE_PENDING_ANSWER
-        answer_type = "searched" if intent == "news_search" else "quoted"
-        yield {"event": "meta", "intent": intent, "answer_type": answer_type, "sources": []}
-        yield {"event": "token", "text": pending}
+        yield {"event": "meta", "intent": intent, "answer_type": "searched", "sources": []}
+        yield {"event": "token", "text": NEWS_PENDING_ANSWER}
         return
 
     for chunk in llm.stream(messages):

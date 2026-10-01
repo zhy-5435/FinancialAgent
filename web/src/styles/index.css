@@ -30,8 +30,70 @@ body {
   border-radius: 3px;
 }
 
-/* 保留回答文本中的换行与段落格式 */
+/* 保留拒答纯文本的换行与段落格式 */
 .prose-answer {
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* Markdown 回答正文（react-markdown + gfm 表格）：行情快照表、参考编号列表等 */
+.md-body {
+  word-break: break-word;
+}
+.md-body > :first-child {
+  margin-top: 0;
+}
+.md-body > :last-child {
+  margin-bottom: 0;
+}
+.md-body p {
+  @apply my-2 leading-relaxed;
+}
+.md-body h1,
+.md-body h2,
+.md-body h3,
+.md-body h4 {
+  @apply mb-2 mt-4 font-semibold text-ink;
+}
+.md-body h1 {
+  @apply text-base;
+}
+.md-body h2,
+.md-body h3,
+.md-body h4 {
+  @apply text-sm;
+}
+.md-body ul {
+  @apply my-2 list-disc space-y-1 pl-5;
+}
+.md-body ol {
+  @apply my-2 list-decimal space-y-1 pl-5;
+}
+.md-body table {
+  @apply my-2 w-full border-collapse text-xs;
+}
+.md-body th,
+.md-body td {
+  @apply border border-line px-2 py-1 text-left;
+}
+.md-body th {
+  @apply bg-raised font-medium text-muted;
+}
+.md-body code {
+  @apply rounded bg-raised px-1 py-0.5 font-mono text-xs;
+}
+.md-body pre {
+  @apply my-2 overflow-x-auto rounded-lg bg-raised p-3;
+}
+.md-body pre code {
+  @apply bg-transparent p-0;
+}
+.md-body blockquote {
+  @apply my-2 border-l-2 border-line pl-3 text-muted;
+}
+.md-body a {
+  @apply text-accent underline decoration-line underline-offset-2 hover:decoration-accent;
+}
+.md-body hr {
+  @apply my-3 border-line;
 }

@@ -34,7 +34,7 @@ export interface SourceHit {
 /** 识别意图：与后端 src/agent/intent.py 的 IntentName 同源；低置信度回落 kb_qa */
 export type Intent = 'kb_qa' | 'chitchat' | 'news_search' | 'quote_query';
 
-/** 作答类型：generated/refused=知识库分支；chatted=闲聊；searched/quoted=资讯·行情分支（M1 阶段为占位话术，M3/M4 接入工具后生效） */
+/** 作答类型：generated/refused=知识库分支；chatted=闲聊；quoted=实时行情快照（表格化含来源免责）；searched=资讯分支（M1 占位话术，M3 接入后生效） */
 export type AnswerType = 'generated' | 'refused' | 'chatted' | 'searched' | 'quoted';
 
 export interface ChatResponse {
