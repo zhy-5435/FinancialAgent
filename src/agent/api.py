@@ -14,13 +14,14 @@ import time
 import uuid
 
 import httpx
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from src.agent.config import AGENT_CORS_ORIGINS, SEARCH_API_BASE
 from src.agent.graph import aask_detail, aask_stream
 from src.agent.quote_service import resolve_quote_by_code
+from src.agent.rate_limit import agent_task_guard, qps_guard
 from src.agent.schemas import (
     ChatRequest,
     ChatResponse,
@@ -73,7 +74,7 @@ def health():
 
 
 @app.post("/chat", response_model=ChatResponse, summary="Agent Loop 问答")
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, _=Depends(agent_task_guard("chat"))):
     """
     统一 Agent Loop（plan → act 并发工具 → observe → replan | answer）问答入口：
     LLM 经 bind_tools 自主选择工具（知识库检索 / 联网资讯 / 实时行情），受步数与墙钟预算约束；
@@ -112,7 +113,7 @@ def _sse(event: str, data: dict) -> str:
 
 
 @app.post("/chat/stream", summary="Agent Loop 问答（SSE 流式）")
-async def chat_stream(req: ChatRequest):
+async def chat_stream(req: ChatRequest, _=Depends(agent_task_guard("chat_stream"))):
     """
     与 POST /chat 同一 Agent Loop 链路，按 SSE 事件流输出（供前端 fetch + ReadableStream 消费）：
         plan   规划步（LLM 决定调用哪些工具）：step / text / tools（新增过程事件，旧前端可忽略）
@@ -182,7 +183,7 @@ async def chat_stream(req: ChatRequest):
 # ---------- 回答反馈标注（HITL 反馈闭环，纯增量、不碰运行时链路） ----------
 
 @app.post("/feedback", response_model=FeedbackResponse, summary="回答反馈标注")
-async def feedback(req: FeedbackRequest):
+async def feedback(req: FeedbackRequest, _=Depends(qps_guard("feedback"))):
     """对某条助手回答提交「有用/无用/内容纠错」标注，落库独立标注表供离线校准。
 
     answer_type/intent/提问由服务端按 message_id 从 memory 存档回填（不采信前端上送）；
@@ -198,7 +199,7 @@ async def feedback(req: FeedbackRequest):
 # ---------- 行情事前确认（灰色区间候选点选后的确定性取数） ----------
 
 @app.post("/quote/confirm", response_model=QuoteConfirmResponse, summary="行情确认候选取数")
-async def quote_confirm(req: QuoteConfirmRequest):
+async def quote_confirm(req: QuoteConfirmRequest, _=Depends(qps_guard("quote_confirm"))):
     """用户在确认条点选候选标的后，按已知新浪取数键直接取数（不经标的解析、不经 LLM 生成）。
 
     数字逐字来自数据源，保持「行情不转写」不变量；点选动作与行情回答均落库会话记忆，
@@ -227,7 +228,8 @@ async def quote_confirm(req: QuoteConfirmRequest):
 # ---------- 会话历史恢复（多轮持久化） ----------
 
 @app.get("/sessions", response_model=list[SessionItem], summary="会话列表")
-def list_sessions(limit: int = Query(50, ge=1, le=200, description="返回会话数上限")):
+def list_sessions(limit: int = Query(50, ge=1, le=200, description="返回会话数上限"),
+                  _=Depends(qps_guard("sessions"))):
     """按最近活跃降序返回已持久化的会话列表，供前端侧栏历史恢复入口"""
     return [
         SessionItem(
@@ -246,6 +248,7 @@ def list_sessions(limit: int = Query(50, ge=1, le=200, description="返回会话
 def get_session_messages(
     session_id: str,
     limit: int | None = Query(None, ge=1, le=500, description="仅返回最近 N 条（缺省全部）"),
+    _=Depends(qps_guard("sessions")),
 ):
     """返回指定会话的可见历史消息（仅 user/assistant，按时间升序），供多轮回放"""
     restored = [
@@ -260,7 +263,7 @@ def get_session_messages(
 
 
 @app.delete("/sessions/{session_id}", summary="删除会话")
-def delete_session(session_id: str):
+def delete_session(session_id: str, _=Depends(qps_guard("sessions"))):
     """删除会话的消息与压缩日志（原始审计仅在显式删除时移除）"""
     memory_manager.delete_session(session_id)
     return {"session_id": session_id, "deleted": True}

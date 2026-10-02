@@ -78,6 +78,22 @@ AGENT_TOKEN_BUDGET = int(os.getenv("AGENT_TOKEN_BUDGET", "0"))
 # Agent Loop 总开关：true=走统一自主循环；false=应急回退到「一步内按意图预过滤工具」的近单轮形态
 AGENT_LOOP_ENABLED = os.getenv("AGENT_LOOP_ENABLED", "true").lower() in ("1", "true", "yes")
 
+# ---------- 接口限流（滑动窗口 QPS + Agent 长任务并发信号量，见 rate_limit.py） ----------
+# 总开关（压测/调试时可短时下掉，不建议生产关闭）
+RATE_LIMIT_ENABLED = os.getenv("RATE_LIMIT_ENABLED", "true").lower() in ("1", "true", "yes")
+# 配 redis://host:port/db 启用 Redis 后端（多实例共享计数、Lua 原子）；留空=进程内存后端
+RATE_LIMIT_REDIS_URL = os.getenv("RATE_LIMIT_REDIS_URL", "redis://127.0.0.1:6379/0")
+# 单用户 QPS：窗口秒数内最多 N 次请求（所有受控端点共用此限额，按端点独立计数）
+RATE_LIMIT_QPS_MAX = int(os.getenv("RATE_LIMIT_QPS_MAX", "5"))
+RATE_LIMIT_QPS_WINDOW_SECONDS = float(os.getenv("RATE_LIMIT_QPS_WINDOW_SECONDS", "10"))
+# 单用户同时进行的 Agent 长任务上限（/chat、/chat/stream，核心保命机制）：
+# 防一人刷堆 70s 长请求打满服务
+RATE_LIMIT_USER_CONCURRENCY = int(os.getenv("RATE_LIMIT_USER_CONCURRENCY", "2"))
+# 全局总并发兜底闸
+RATE_LIMIT_GLOBAL_CONCURRENCY = int(os.getenv("RATE_LIMIT_GLOBAL_CONCURRENCY", "80"))
+# 并发槽租约（秒）：须大于单次最长任务（墙钟 60 + 补救生成 45），崩溃/断连残留由到期自动回收
+RATE_LIMIT_SLOT_LEASE_SECONDS = float(os.getenv("RATE_LIMIT_SLOT_LEASE_SECONDS", "180"))
+
 # ---------- 工具层容错（超时 / 重试 / 熔断） ----------
 # 分工具硬超时（秒）：知识库检索复用 L2 网络调用、网搜复用 WEB_SEARCH_TIMEOUT、行情复用 QUOTE_TIMEOUT_SECONDS
 TOOL_TIMEOUT_KB = float(os.getenv("TOOL_TIMEOUT_KB", "30"))
