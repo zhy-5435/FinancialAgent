@@ -8,14 +8,23 @@ import json
 
 from src.memory.context.builder import ContextBuilder
 from src.memory.context.tokenizer import estimate
-from src.memory.schemas import ContextBundle, SessionSummary, StoredMessage
+from src.memory.schemas import (
+    ContextBundle,
+    FeedbackCategory,
+    FeedbackRecord,
+    SessionSummary,
+    StoredMessage,
+)
+from src.memory.store.feedback_store import feedback_store
 from src.memory.store.sqlite_store import conversation_store
 
 
 class MemoryManager:
-    def __init__(self, store=conversation_store, builder: ContextBuilder | None = None):
+    def __init__(self, store=conversation_store, builder: ContextBuilder | None = None,
+                 feedback=feedback_store):
         self.store = store
         self.builder = builder or ContextBuilder()
+        self.feedback = feedback
 
     # ---------- 构建推理上下文（调用模型前） ----------
 
@@ -87,6 +96,32 @@ class MemoryManager:
             token_est=estimate(content),
         )
         return self.store.append_message(msg)
+
+    # ---------- 回答反馈标注（HITL 反馈闭环，纯增量、不影响运行时） ----------
+
+    def record_feedback(
+        self, session_id: str, message_id: str, category: FeedbackCategory, comment: str | None = None
+    ) -> FeedbackRecord:
+        """落库一条回答反馈：answer_type/intent/提问由服务端从被反馈消息回填，不采信前端上送。"""
+        answer_type: str | None = None
+        intent: str | None = None
+        question: str | None = None
+        msg = self.store.get_message(message_id)
+        if msg is not None and msg.session_id == session_id:
+            answer_type = msg.answer_type
+            intent = msg.intent
+            question = self.store.preceding_user_question(session_id, msg.seq)
+        rec = FeedbackRecord(
+            feedback_id="", session_id=session_id, message_id=message_id,
+            category=category, comment=comment, answer_type=answer_type,
+            intent=intent, question=question,
+        )
+        return self.feedback.record(rec)
+
+    def list_feedback(self, category: str | None = None, answer_type: str | None = None,
+                      limit: int = 200) -> list[FeedbackRecord]:
+        """按类别/作答类型取最近的反馈标注，供离线校准（拒答 vs 低置信回流分析）。"""
+        return self.feedback.list_for_analysis(category=category, answer_type=answer_type, limit=limit)
 
     # ---------- 历史恢复 ----------
 

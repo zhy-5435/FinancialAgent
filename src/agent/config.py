@@ -56,6 +56,11 @@ INTENT_CONFIDENCE_THRESHOLD = float(os.getenv("INTENT_CONFIDENCE_THRESHOLD", "0.
 QUOTE_TIMEOUT_SECONDS = float(os.getenv("QUOTE_TIMEOUT_SECONDS", "10"))
 # 错名/错别字 LLM 推断命中阈值：低于该值视为猜不准，走未识别话术而非强行作答
 QUOTE_FUZZY_MIN_CONFIDENCE = float(os.getenv("QUOTE_FUZZY_MIN_CONFIDENCE", "0.6"))
+# 「事前确认」触发信号：LLM 推断出的标准名再跑 suggest3，命中 ≥2 个不同标的/市场
+# 即视为存在真实歧义，推候选让用户点选；唯一命中则直接作答 + 事后声明。
+# （不再依赖 LLM 自报置信度分档——实测其值二元极化，要么 ≥0.95 要么直接 null，灰带为空集。）
+# 确认条最多展示的候选标的数（suggest3 白名单命中的前 N 条，去重）
+QUOTE_CONFIRM_CANDIDATE_LIMIT = int(os.getenv("QUOTE_CONFIRM_CANDIDATE_LIMIT", "5"))
 # 行情数据源与免责固定话术（按要求必须注明来源且不得加 LLM 生成）
 QUOTE_SOURCE_NAME = "新浪财经公开行情接口（hq.sinajs.cn 实时快照）"
 QUOTE_DISCLAIMER = "行情数据来自第三方公开接口，仅供参考、不构成任何投资建议，可能有延迟，请以交易所公布数据为准；本条回答非 L1 知识库权威内容。"

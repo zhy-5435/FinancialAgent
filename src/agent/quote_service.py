@@ -12,7 +12,9 @@
     - 名称解析优先级：显式代码（含 5 位港股裸码）→ 常见指数静态映射 →
       智能检索端点；全部落空时才调用 LLM 做错别字/近似标的推断（宁缺毋滥，
       置信度低于 QUOTE_FUZZY_MIN_CONFIDENCE 视为猜不准）；LLM 只负责“猜标的名”，
-      数字一律来自数据源，推断命中时在回答开头用固定话术说明情况；
+      猜出后以「推断名的 suggest3 命中数」这一客观信号定归宿：唯一命中直接作答
+      （开头用固定话术声明），命中多个不同标的/市场则推「事前确认」候选让用户点选；
+      数字一律来自数据源，LLM 不参与任何取数与转写；
     - 所有网络/LLM 调用带硬超时，超时或无数据返回固定降级话术，不抛异常、
       不进入 LLM 生成——行情数字必须与数据源逐字一致，杜绝转写幻觉。
 """
@@ -24,13 +26,19 @@ import httpx
 from pydantic import BaseModel, Field
 
 from src.agent.config import (
+    LLM_API_KEY,
+    LLM_BASE_URL,
+    LLM_EXTRA_BODY,
+    LLM_MODEL,
+    QUOTE_CONFIRM_CANDIDATE_LIMIT,
     QUOTE_DISCLAIMER,
     QUOTE_FUZZY_MIN_CONFIDENCE,
     QUOTE_SOURCE_NAME,
     QUOTE_TIMEOUT_SECONDS,
 )
-from src.agent.llm import llm
+from langchain.chat_models import init_chat_model
 from src.agent.prompts import (
+    QUOTE_CONFIRM_ASK,
     QUOTE_FETCH_FAILED_ANSWER,
     QUOTE_FUZZY_NOTE,
     QUOTE_NOT_FOUND_ANSWER,
@@ -67,12 +75,28 @@ _HEADERS = {"Referer": "https://finance.sina.com.cn", "User-Agent": "Mozilla/5.0
 
 
 class _SymbolGuess(BaseModel):
-    """LLM 标的推断结构化输出（仅用于纠错，不产出任何行情数字）"""
-    canonical: str | None = Field(None, description="推断出的标准标的名称或代码；拿不准为 null")
-    confidence: float = Field(0.0, ge=0, le=1, description="对该推断的把握")
+    """LLM 标的推断结构化输出（仅用于纠错/歧义识别，不产出任何行情数字）"""
+    canonical: str | None = Field(None, description="最可能想查询的标准标的名称或代码；完全拿不准为 null")
+    alternatives: list[str] = Field(
+        default_factory=list,
+        description="仅当用户用业务/行业描述或泛指而非点名时，列出的其他同样合理、真实存在的候选标准名；"
+        "用户已点名（含错别字/同音字/简称/常见别名）时必须留空，不要列其他公司",
+    )
+    confidence: float = Field(0.0, ge=0, le=1, description="对首选 canonical 的把握")
 
 
-_structured_llm = llm.with_structured_output(_SymbolGuess)
+def _build_guess_llm():
+    """标的推断专用 LLM：temperature=0 确定化，降低同一描述性输入多次调用结果漂移。
+
+    与全局对话 llm 隔离，不影响其他链路采样行为；extra_body 透传保持与主实例一致。"""
+    kwargs = {"extra_body": LLM_EXTRA_BODY} if LLM_EXTRA_BODY else {}
+    return init_chat_model(
+        model=LLM_MODEL, model_provider="openai",
+        base_url=LLM_BASE_URL, api_key=LLM_API_KEY, temperature=0.0, **kwargs,
+    )
+
+
+_structured_llm = _build_guess_llm().with_structured_output(_SymbolGuess)
 
 
 def _run_with_timeout(fn, timeout: float):
@@ -116,19 +140,45 @@ def _entry_to_key(fields: list[str]) -> str | None:
     return None
 
 
-def _suggest_lookup(key: str) -> tuple[str, str] | None:
-    """新浪智能检索端点：名称关键词 → 首个白名单内标的的 (取数键, 条目显示名)"""
+def _suggest_lookup_all(key: str, limit: int) -> list[tuple[str, str]]:
+    """新浪智能检索端点：名称关键词 → 白名单内前 `limit` 个 (取数键, 条目显示名)，按代码去重。
+
+    供「事前确认」列候选用：同名可能对应多只证券（如「平安」→ 多只 A/港股），
+    返回结构化候选列表交前端内联点选，数字一律不在此环节生成。
+    """
     url = f"https://suggest3.sinajs.cn/suggest/type=&key={quote(key)}"
     resp = httpx.get(url, headers=_HEADERS, timeout=_SUGGEST_TIMEOUT)
     resp.raise_for_status()
     body = resp.content.decode("gbk", errors="ignore")
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
     for entry in re.findall(r'"([^"]+)"', body):
         for item in entry.split(";"):
             fields = item.split(",")
             code = _entry_to_key(fields)
-            if code:
-                return code, fields[0].strip()
-    return None
+            if code and code not in seen:
+                seen.add(code)
+                out.append((code, fields[0].strip()))
+                if len(out) >= limit:
+                    return out
+    return out
+
+
+def _suggest_lookup(key: str) -> tuple[str, str] | None:
+    """新浪智能检索端点：名称关键词 → 首个白名单内标的的 (取数键, 条目显示名)"""
+    hits = _suggest_lookup_all(key, 1)
+    return hits[0] if hits else None
+
+
+def _market_of(code: str) -> str:
+    """由新浪取数键前缀推断市场归类，供候选展示（不取数、不含任何行情数字）"""
+    if code.startswith("rt_hk"):
+        return "港股" if _HK_CODE_RE.match(code[len("rt_hk"):]) else "港股指数"
+    if code.startswith("gb_"):
+        return "美股"
+    if code[:2].lower() in ("sh", "sz", "bj"):
+        return "A股"
+    return ""
 
 
 # ---------- 标的解析（快速路径；LLM 纠错在 get_market_quote 里兜底） ----------
@@ -339,8 +389,12 @@ def fetch_quote(sina_code: str) -> dict | None:
 
 # ---------- LLM 错名/近似标的推断（仅快速路径全部落空后触发一次） ----------
 
-def _guess_canonical(symbol: str, question: str) -> str | None:
-    """让 LLM 从错别字/口语输入推断标准标的名；低置信或异常一律返回 None（宁缺毋滥）"""
+def _guess_symbol(symbol: str, question: str) -> _SymbolGuess | None:
+    """让 LLM 从错别字/口语输入推断标准标的名，返回带 confidence 的结构化结果。
+
+    拿不准（异常/无 canonical/与原始输入无实质差异）一律返回 None；置信度分档
+    （灰色确认 vs 命中作答 vs 未识别）由调用方 get_market_quote 依阈值决定，此处不裁剪。
+    """
     raw = (symbol or question or "").strip()
     if not raw:
         return None
@@ -359,12 +413,10 @@ def _guess_canonical(symbol: str, question: str) -> str | None:
     if not result or not result.canonical:
         return None
     canonical = result.canonical.strip()
-    # 与原始输入无实质差异（快速路径已试过没中）或把握不足，均视为猜不准
+    # 与原始输入无实质差异（快速路径已试过没中）视为猜不准
     if not canonical or _similar(canonical, raw):
         return None
-    if result.confidence < QUOTE_FUZZY_MIN_CONFIDENCE:
-        return None
-    return canonical
+    return result
 
 
 def _fmt_amount(v: float | None) -> str | None:
@@ -378,10 +430,65 @@ def _fmt_amount(v: float | None) -> str | None:
     return f"{v:.0f}"
 
 
+def _resolve_candidates(names: list[str]) -> list[tuple[str, str]]:
+    """把一组候选标准名逐个经 suggest3 解析为真实白名单标的（每个名取其首个命中），
+    按代码去重、保持顺序，最多 QUOTE_CONFIRM_CANDIDATE_LIMIT 个。
+
+    供「事前确认」列跨公司候选：只保留能在数据源检索到的真实标的（解不出的名字自然丢弃），
+    不取数、不产出任何行情数字。
+    """
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for nm in names:
+        nm = (nm or "").strip()
+        if not nm:
+            continue
+        try:
+            hit = _run_with_timeout(lambda k=nm: _suggest_lookup(k), _SUGGEST_TIMEOUT + 2)
+        except Exception:
+            hit = None
+        if hit and hit[0] not in seen:
+            seen.add(hit[0])
+            out.append(hit)
+            if len(out) >= QUOTE_CONFIRM_CANDIDATE_LIMIT:
+                break
+    return out
+
+
+def _build_confirm(
+    raw_input: str, canonical: str, confidence: float, hits: list[tuple[str, str]]
+) -> dict | None:
+    """命中歧义：把推断出的标准名对应的多个白名单候选组装成「事前确认」结果。
+
+    候选仅含取数键 / 显示名 / 市场，继不取数、不含任何行情数字（守住「数字不转写」不变量）。
+    调用方已保证 hits 来自对 canonical 的 suggest3 枚举；hits 不足 2 个（无真实歧义）
+    时返回 None，交调用方按唯一命中直接作答或回落未识别。
+    """
+    candidates = [
+        {"code": code, "name": name, "market": _market_of(code)}
+        for code, name in hits
+    ]
+    if len(candidates) < 2:
+        return None
+    return {
+        "ok": False,
+        "confirm": True,
+        "markdown": QUOTE_CONFIRM_ASK.format(raw=raw_input),
+        "question": raw_input,
+        "guessed": canonical,
+        "confidence": confidence,
+        "candidates": candidates,
+        "data": None,
+    }
+
+
 def get_market_quote(symbol: str, question: str = "") -> dict:
     """行情查询统一入口（供工具层调用），永不抛异常。
 
-    返回：{"ok": bool, "markdown": 整理好的回答, "data": 快照 | None}
+    返回：{"ok": bool, "markdown": 整理好的回答, "data": 快照 | None}；
+    快速路径落空后，若 LLM 判定用户未点名而是描述/泛指（给出多家候选）且解析出
+    ≥ 2 个真实标的（跨公司歧义）时，额外返回 {"confirm": True, "candidates": [...]}，
+    由前端做「事前确认」而非直接作答。
     """
     # 说明里展示用户原始问句（优先）而非意图抽取/清洗后的中间变量，避免暴露抽取错误误导用户
     raw_input = (question or symbol or "").strip()
@@ -392,14 +499,33 @@ def get_market_quote(symbol: str, question: str = "") -> dict:
             )
             note = None
             if code is None:
-                # 快速路径全落空 → LLM 推断最接近标的，命中后仅再做一次完整解析（不再触发 LLM，无递归）
-                canonical = _guess_canonical(symbol, question)
-                if canonical:
-                    code, _ = _run_with_timeout(
-                        lambda: resolve_sina_code(canonical, ""), QUOTE_TIMEOUT_SECONDS
-                    )
-                    if code:
-                        note = QUOTE_FUZZY_NOTE.format(raw=raw_input, canonical=canonical)
+                # 快速路径全落空 → LLM 推断标准名（无递归、不再触发 LLM）
+                guess = _guess_symbol(symbol, question)
+                if not guess:
+                    return {"ok": False, "markdown": QUOTE_NOT_FOUND_ANSWER, "data": None}
+                canonical = (guess.canonical or "").strip()
+                # 汇总首选 + 其他合理候选（去重保序），先枚举出真实候选再定归宿：
+                # 只要解析出 ≥ 2 个不同标的就「先弹框让用户选」（不取数）；置信度低恰恰是歧义信号，
+                # 不用置信度拦住多候选；仅当只有唯一候选时，才用置信度门槛决定直接作答 or 未识别。
+                names: list[str] = []
+                for nm in [canonical, *(guess.alternatives or [])]:
+                    nm = (nm or "").strip()
+                    if nm and nm.lower() not in {x.lower() for x in names}:
+                        names.append(nm)
+                hits = _resolve_candidates(names)
+                if len(hits) >= 2:
+                    # 多个真实候选 → 存在歧义 → 取数之前先列候选交用户事前确认（不浪费取数/算力）
+                    confirm = _build_confirm(raw_input, canonical, guess.confidence, hits)
+                    if confirm:
+                        return confirm
+                    return {"ok": False, "markdown": QUOTE_NOT_FOUND_ANSWER, "data": None}
+                if len(hits) == 1 and guess.confidence >= QUOTE_FUZZY_MIN_CONFIDENCE:
+                    # 唯一标的且把握足够 → 直接作答 + 事后声明
+                    code = hits[0][0]
+                    note = QUOTE_FUZZY_NOTE.format(raw=raw_input, canonical=canonical)
+                else:
+                    # 无候选 / 唯一但把握不足 → 宁缺毋滥，回落未识别
+                    return {"ok": False, "markdown": QUOTE_NOT_FOUND_ANSWER, "data": None}
             elif fuzzy:
                 # 检索端点模糊命中（错别字/近似名）：同样在回答中说明情况
                 note = QUOTE_FUZZY_NOTE.format(raw=raw_input, canonical=fuzzy[1])
@@ -418,6 +544,67 @@ def get_market_quote(symbol: str, question: str = "") -> dict:
         return {"ok": True, "markdown": markdown, "data": quote}
     except Exception:
         # 数据源不可达等未预期异常统一降级话术，不阻断问答链路
+        return {"ok": False, "markdown": QUOTE_FETCH_FAILED_ANSWER, "data": None}
+
+
+# 行情意图粗判信号（仅用于预检门控，避免对非行情问句白白跑一次检索/推断）
+_QUOTE_INTENT_RE = re.compile(
+    r"(股价|现价|报价|行情|净值|涨跌|开盘|收盘|涨停|跌停|换手率|市盈率|市值|指数|大盘|"
+    r"多少钱|多少点|什么价|现在价|现在多少|今日价|今天多少|买价|卖价|盘口|盯盘)"
+)
+
+
+def looks_like_quote_query(text: str) -> bool:
+    """粗判问句是否像行情查询（含行情信号词），供图编排层决定要不要跑标的前置预检。"""
+    return bool(_QUOTE_INTENT_RE.search(text or ""))
+
+
+def precheck_quote_ambiguity(question: str) -> dict | None:
+    """在调用行情工具之前的轻量歧义预检（对原始问句），返回 confirm 载荷或 None。
+
+    仅当同时满足：“快速解析对原句完全落空”（原句不是可直接定位的点名/代码/常见别名）
+    且 “LLM 枚举出 ≥ 2 个真实候选（跨公司歧义）” 时，才返回 confirm；否则返回 None。
+    返回 confirm 时上层直接弹选择框、跳过 reason 与取数；选选后才走 resolve_quote_by_code 取数。
+    全程不取行情数据、不产出任何数字（守住「不浪费算力」与「数字不转写」）；永不抛异常。
+    """
+    raw = (question or "").strip()
+    if not raw:
+        return None
+    try:
+        code, _ = _run_with_timeout(lambda: resolve_sina_code(raw, raw), QUOTE_TIMEOUT_SECONDS)
+        if code is not None:
+            return None  # 原句可精确定位（点名/代码/常见别名）→ 正常直接作答，不需确认
+        guess = _guess_symbol(raw, raw)
+        if not guess:
+            return None
+        canonical = (guess.canonical or "").strip()
+        names: list[str] = []
+        for nm in [canonical, *(guess.alternatives or [])]:
+            nm = (nm or "").strip()
+            if nm and nm.lower() not in {x.lower() for x in names}:
+                names.append(nm)
+        hits = _resolve_candidates(names)
+        if len(hits) >= 2:
+            return _build_confirm(raw, canonical, guess.confidence, hits)
+        return None
+    except Exception:
+        return None
+
+
+def resolve_quote_by_code(sina_code: str) -> dict:
+    """确认条点选后的确定性取数入口：按已知新浪取数键直接取数，不经解析、不经 LLM。
+
+    供 `/quote/confirm` 接口调用，返回与 get_market_quote 一致的 {ok, markdown, data} 形状；
+    数字仍逐字来自数据源，保持「行情不转写」不变量。
+    """
+    try:
+        quote = _run_with_timeout(lambda: fetch_quote(sina_code), QUOTE_TIMEOUT_SECONDS)
+        if not quote:
+            return {"ok": False, "markdown": QUOTE_NOT_FOUND_ANSWER, "data": None}
+        return {"ok": True, "markdown": _format_markdown(quote), "data": quote}
+    except FutTimeout:
+        return {"ok": False, "markdown": QUOTE_FETCH_FAILED_ANSWER, "data": None}
+    except Exception:
         return {"ok": False, "markdown": QUOTE_FETCH_FAILED_ANSWER, "data": None}
 
 

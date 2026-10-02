@@ -8,6 +8,7 @@ session_id / message_id 字段先行占位，后续升级多轮会话与流式�
     或
     python -m src.agent.api
 """
+import asyncio
 import json
 import time
 import uuid
@@ -19,9 +20,14 @@ from fastapi.responses import StreamingResponse
 
 from src.agent.config import AGENT_CORS_ORIGINS, SEARCH_API_BASE
 from src.agent.graph import aask_detail, aask_stream
+from src.agent.quote_service import resolve_quote_by_code
 from src.agent.schemas import (
     ChatRequest,
     ChatResponse,
+    FeedbackRequest,
+    FeedbackResponse,
+    QuoteConfirmRequest,
+    QuoteConfirmResponse,
     RestoredMessage,
     SessionItem,
     SessionMessagesResponse,
@@ -87,13 +93,15 @@ async def chat(req: ChatRequest):
 
     return ChatResponse(
         session_id=session_id,
-        message_id=f"msg-{uuid.uuid4().hex[:12]}",
+        # 优先用 memory 落库的助手消息 ID（供 /feedback 精确锚定）；无存档时回落服务端生成 ID
+        message_id=result.get("message_id") or f"msg-{uuid.uuid4().hex[:12]}",
         question=req.question,
         answer=result["answer"],
         intent=result["intent"],
         answer_type=result["answer_type"],
         sources=result["sources"],
         steps=result.get("steps"),
+        confirm=result.get("confirm"),
         elapsed_ms=int((time.perf_counter() - started) * 1000),
     )
 
@@ -110,6 +118,7 @@ async def chat_stream(req: ChatRequest):
         plan   规划步（LLM 决定调用哪些工具）：step / text / tools（新增过程事件，旧前端可忽略）
         step   单个工具执行结果：name / ok / summary（新增过程事件）
         meta   终答就绪即推送：intent + answer_type + sources + session_id/message_id
+        confirm 行情灰色确认（新增过程事件，旧前端可忽略）：question + guessed + candidates（候选标的，无数字）
         token  终答文本分片（拒答/行情/无素材为定稿文本分片）
         done   正常结束：elapsed_ms
         error  链路异常：detail（如 L2 不可用，对应 502 语义）
@@ -119,17 +128,31 @@ async def chat_stream(req: ChatRequest):
     started = time.perf_counter()
 
     async def gen():
+        # 反馈锚定 ID：优先用 finalize 落库的真实 memory 助手消息 ID（meta 事件回传），
+        # 无存档（异常/旧链路）时回落到本层生成的占位 ID
+        real_message_id = message_id
         try:
             async for ev in aask_stream(req.question, session_id):
                 etype = ev["event"]
                 if etype == "meta":
+                    if ev.get("message_id"):
+                        real_message_id = ev["message_id"]
                     yield _sse("meta", {
                         "session_id": session_id,
-                        "message_id": message_id,
+                        "message_id": real_message_id,
                         "question": req.question,
                         "intent": ev["intent"],
                         "answer_type": ev["answer_type"],
                         "sources": ev["sources"],
+                    })
+                elif etype == "confirm":
+                    # 行情灰色确认：候选标的（无数字）交前端内联点选，旧前端忽略此事件不影响话术渲染
+                    yield _sse("confirm", {
+                        "session_id": session_id,
+                        "message_id": real_message_id,
+                        "question": ev["question"],
+                        "guessed": ev["guessed"],
+                        "candidates": ev["candidates"],
                     })
                 elif etype == "token":
                     yield _sse("token", {"text": ev["text"]})
@@ -153,6 +176,51 @@ async def chat_stream(req: ChatRequest):
             # nginx 等反代关闭缓冲，保证逐 token 到达（本地 Vite proxy 无此问题）
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+# ---------- 回答反馈标注（HITL 反馈闭环，纯增量、不碰运行时链路） ----------
+
+@app.post("/feedback", response_model=FeedbackResponse, summary="回答反馈标注")
+async def feedback(req: FeedbackRequest):
+    """对某条助手回答提交「有用/无用/内容纠错」标注，落库独立标注表供离线校准。
+
+    answer_type/intent/提问由服务端按 message_id 从 memory 存档回填（不采信前端上送）；
+    仅作数据回流，不参与任何运行时决策，符合「防幻觉底线不可回退」的护栏文化。
+    """
+    rec = memory_manager.record_feedback(
+        session_id=req.session_id, message_id=req.message_id,
+        category=req.category, comment=req.comment,
+    )
+    return FeedbackResponse(feedback_id=rec.feedback_id, recorded=True)
+
+
+# ---------- 行情事前确认（灰色区间候选点选后的确定性取数） ----------
+
+@app.post("/quote/confirm", response_model=QuoteConfirmResponse, summary="行情确认候选取数")
+async def quote_confirm(req: QuoteConfirmRequest):
+    """用户在确认条点选候选标的后，按已知新浪取数键直接取数（不经标的解析、不经 LLM 生成）。
+
+    数字逐字来自数据源，保持「行情不转写」不变量；点选动作与行情回答均落库会话记忆，
+    保持多轮上下文连贯，返回与行情终答同形状（answer_type=quoted）。
+    """
+    started = time.perf_counter()
+    res = await asyncio.to_thread(resolve_quote_by_code, req.code)
+    answer = res["markdown"]
+    # 回显用户的点选动作作为一条 user 消息（供上下文与审计语境），再落库行情助手回答
+    note = f"（已选择标的：{req.name or req.code}）查询实时行情"
+    memory_manager.remember_user(req.session_id, note, intent="quote_query")
+    assistant = memory_manager.remember_assistant(
+        req.session_id, answer, "quoted", intent="quote_query"
+    )
+    return QuoteConfirmResponse(
+        session_id=req.session_id,
+        message_id=assistant.message_id,
+        answer=answer,
+        answer_type="quoted",
+        intent="quote_query",
+        sources=[],
+        elapsed_ms=int((time.perf_counter() - started) * 1000),
     )
 
 

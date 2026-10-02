@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from 'react';
 
+import type { FeedbackCategory, QuoteCandidate } from '../../api/types';
 import type { ChatMessage } from '../../hooks/useChat';
 import * as Icons from '../icons';
 import MessageBubble from './MessageBubble';
@@ -9,6 +10,8 @@ import MessageBubble from './MessageBubble';
 interface MessageListProps {
   messages: ChatMessage[];
   autoCite: boolean;
+  onFeedback?: (messageId: string, category: FeedbackCategory, comment?: string | null) => void;
+  onResolveConfirm?: (messageId: string, candidate: QuoteCandidate) => void;
 }
 
 /** 中央引导区：对应示例 CloudCode + "What should we build?" */
@@ -26,7 +29,12 @@ function EmptyGuide() {
   );
 }
 
-export default function MessageList({ messages, autoCite }: MessageListProps) {
+export default function MessageList({
+  messages,
+  autoCite,
+  onFeedback,
+  onResolveConfirm,
+}: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -41,7 +49,13 @@ export default function MessageList({ messages, autoCite }: MessageListProps) {
   return (
     <div className="space-y-5 pb-4">
       {messages.map((m) => (
-        <MessageBubble key={m.id} message={m} autoCite={autoCite} />
+        <MessageBubble
+          key={m.id}
+          message={m}
+          autoCite={autoCite}
+          onFeedback={onFeedback}
+          onResolveConfirm={onResolveConfirm}
+        />
       ))}
       <div ref={bottomRef} />
     </div>

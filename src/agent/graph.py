@@ -37,6 +37,7 @@ from src.agent.config import (
 )
 from src.agent.intent import rule_classify
 from src.agent.llm import llm
+from src.agent.quote_service import looks_like_quote_query, precheck_quote_ambiguity
 from src.agent.prompts import (
     AGENT_BUDGET_NOTE,
     AGENT_SYSTEM_PROMPT,
@@ -62,11 +63,13 @@ class AgentState(TypedDict):
     sources: list[dict]                   # 累积的 kb 有效切片（全局编号，供溯源）
     news_evidence: list[str]              # 累积的网搜素材块
     quote_markdown: str                   # 行情工具产出的逐字 markdown（终态直接采用）
+    quote_confirm: dict | None            # 行情多标的歧义的确认载荷（候选标的，供 SSE confirm 事件）
     hard_tool_failed: bool                # hard 语义工具（kb 检索）失败 → 触发拒答
     budget_exceeded: bool                 # 步数/墙钟超限
     answer: str
     answer_type: str
     intent: str
+    assistant_message_id: str             # 本轮助手回答落库后的 memory 消息 ID（供反馈锚定）
 
 
 # ---------- 辅助：消息转换与工具结果序列化 ----------
@@ -106,6 +109,8 @@ def _tool_message_content(name: str, res: ToolResult, kb_start: int) -> str:
         return _render_kb_block(res.data, kb_start)
     if name == "search_realtime_quote":
         data = res.data or {}
+        if data.get("confirm"):
+            return "行情标的存在多个候选（歧义），未直接作答：" + (data.get("markdown") or "")
         if not data.get("ok"):
             return "行情工具未能取数：" + (data.get("markdown") or "无数据")
         return data.get("markdown", "")
@@ -129,6 +134,12 @@ def prepare(state: AgentState) -> dict:
         hit = rule_classify(question)
         candidates = registry.candidates_for_intent(hit.intent if hit else None) or []
 
+    # 行情标的歧义前置预检：对原始问句先判是否跨公司歧义（不调行情工具、不取数），
+    # 命中则短路到 finalize 直接弹选择框，避免 reason LLM 自行脑补具体标的先取数、浪费算力。
+    quote_confirm = None
+    if AGENT_LOOP_ENABLED and looks_like_quote_query(question):
+        quote_confirm = precheck_quote_ambiguity(question)
+
     bundle = (
         memory_manager.build(sid, AGENT_SYSTEM_PROMPT, question, mode="turns",
                              before_seq=user_seq or None)
@@ -149,6 +160,7 @@ def prepare(state: AgentState) -> dict:
         "sources": [],
         "news_evidence": [],
         "quote_markdown": "",
+        "quote_confirm": quote_confirm,
         "hard_tool_failed": False,
         "budget_exceeded": False,
     }
@@ -199,6 +211,7 @@ async def act(state: AgentState) -> dict:
     sources = list(state["sources"])
     news_evidence = list(state["news_evidence"])
     quote_markdown = state["quote_markdown"]
+    quote_confirm = state.get("quote_confirm")
     hard_tool_failed = state["hard_tool_failed"]
 
     for tc, res in zip(tool_calls, results):
@@ -210,8 +223,11 @@ async def act(state: AgentState) -> dict:
         elif res.ok and name == "web_search":
             news_evidence.append(res.data)
         elif res.ok and name == "search_realtime_quote":
-            if (res.data or {}).get("ok"):
-                quote_markdown = res.data.get("markdown", "")
+            data = res.data or {}
+            if data.get("ok"):
+                quote_markdown = data.get("markdown", "")
+            elif data.get("confirm"):
+                quote_confirm = data
         spec = registry.get(name)
         if not res.ok and spec is not None and spec.failure_class == "hard":
             hard_tool_failed = True
@@ -234,6 +250,7 @@ async def act(state: AgentState) -> dict:
         "sources": sources,
         "news_evidence": news_evidence,
         "quote_markdown": quote_markdown,
+        "quote_confirm": quote_confirm,
         "hard_tool_failed": hard_tool_failed,
     }
 
@@ -247,7 +264,8 @@ def observe(state: AgentState) -> dict:
 
 
 def route_observe(state: AgentState) -> str:
-    if state["hard_tool_failed"] or state["budget_exceeded"]:
+    # 行情多标的歧义确认：直接收敛到 finalize 推 confirm，不再让模型 replan 猜答（事前澄清优先）
+    if state.get("quote_confirm") or state["hard_tool_failed"] or state["budget_exceeded"]:
         return "finalize"
     return "reason"
 
@@ -258,6 +276,7 @@ async def finalize(state: AgentState) -> dict:
     used = {e["name"] for e in trace if e.get("type") == "tool_result" and e.get("ok")}
     sources = state["sources"]
     quote_md = state["quote_markdown"]
+    quote_confirm = state.get("quote_confirm")
     news = state["news_evidence"]
 
     # 模型给出的终答文本（仅当最后一条是无 tool_calls 的 AIMessage）
@@ -273,6 +292,12 @@ async def finalize(state: AgentState) -> dict:
     if quote_md:
         # 行情终态：数字逐字采用工具 markdown，不经模型转写
         answer, answer_type, intent = quote_md, "quoted", "quote_query"
+    elif quote_confirm:
+        # 行情多标的歧义确认：回固定澄清话术，候选经 SSE confirm 事件交前端内联点选（不含任何数字）
+        return _emit(
+            state, quote_confirm["markdown"], "confirm", "quote_query", [],
+            quote_confirm=quote_confirm,
+        )
     elif "search_knowledge" in used and (state["hard_tool_failed"] or not sources):
         # 知识库无有效证据 / 检索硬失败 → 固定拒答（守住底线，不采信模型文本）
         answer, answer_type, intent = REFUSAL_ANSWER, "refused", "kb_qa"
@@ -297,11 +322,21 @@ async def finalize(state: AgentState) -> dict:
     return _emit(state, answer, answer_type, intent, out_sources)
 
 
-def _emit(state: AgentState, answer: str, answer_type: str, intent: str, sources: list[dict]) -> dict:
-    """落库本轮助手回答并返回 finalize 的 state 增量。"""
+def _emit(state: AgentState, answer: str, answer_type: str, intent: str, sources: list[dict], **extra) -> dict:
+    """落库本轮助手回答并返回 finalize 的 state 增量；回写 memory 消息 ID 供前端反馈锚定。"""
+    assistant_message_id = ""
     if state["session_id"]:
-        memory_manager.remember_assistant(state["session_id"], answer, answer_type, intent=intent)
-    return {"answer": answer, "answer_type": answer_type, "intent": intent, "sources": sources}
+        assistant_message_id = memory_manager.remember_assistant(
+            state["session_id"], answer, answer_type, intent=intent
+        ).message_id
+    return {
+        "answer": answer,
+        "answer_type": answer_type,
+        "intent": intent,
+        "sources": sources,
+        "assistant_message_id": assistant_message_id,
+        **extra,
+    }
 
 
 async def _synthesize(messages: list[AnyMessage]) -> str:
@@ -331,7 +366,12 @@ def _tool_payload(name: str, res: ToolResult):
     if name == "search_knowledge":
         return res.data[:5]
     if name == "search_realtime_quote":
-        return (res.data or {}).get("data")
+        data = res.data or {}
+        # 灰色确认：落库候选标的，供拒答/低置信回流分析「该补文档还是该调阈值」
+        if data.get("confirm"):
+            return {"confirm": True, "guessed": data.get("guessed"),
+                    "candidates": data.get("candidates", [])}
+        return data.get("data")
     return _truncate(res.data or "", 4000)
 
 
@@ -340,6 +380,11 @@ def _truncate(text: str, limit: int) -> str:
 
 
 # ---------- 图构建 ----------
+
+def route_prepare(state: AgentState) -> str:
+    """前置预检已锁定行情歧义 → 跳过 reason/act（不调工具、不取数），直接到 finalize 弹框。"""
+    return "finalize" if state.get("quote_confirm") else "reason"
+
 
 def build_agent_graph():
     """构建并编译带环的 Agent Loop 图（异步可 ainvoke / astream）。"""
@@ -351,7 +396,7 @@ def build_agent_graph():
     graph.add_node("finalize", finalize)
 
     graph.add_edge(START, "prepare")
-    graph.add_edge("prepare", "reason")
+    graph.add_conditional_edges("prepare", route_prepare, {"reason": "reason", "finalize": "finalize"})
     graph.add_conditional_edges("reason", route_reason, {"act": "act", "finalize": "finalize"})
     graph.add_edge("act", "observe")
     graph.add_conditional_edges("observe", route_observe, {"reason": "reason", "finalize": "finalize"})
@@ -377,11 +422,13 @@ def _initial_state(question: str, session_id: str | None) -> dict:
         "sources": [],
         "news_evidence": [],
         "quote_markdown": "",
+        "quote_confirm": None,
         "hard_tool_failed": False,
         "budget_exceeded": False,
         "answer": "",
         "answer_type": "",
         "intent": "",
+        "assistant_message_id": "",
     }
 
 
@@ -396,6 +443,8 @@ async def aask_detail(question: str, session_id: str | None = None) -> dict:
         "answer_type": state["answer_type"],
         "sources": state["sources"],
         "steps": state.get("trace", []),
+        "message_id": state.get("assistant_message_id") or "",
+        "confirm": state.get("quote_confirm"),
     }
 
 
@@ -436,6 +485,11 @@ async def aask_stream(question: str, session_id: str | None = None) -> AsyncIter
                                "summary": e.get("summary", "")}
             elif node == "finalize":
                 yield {"event": "meta", "intent": delta["intent"],
-                       "answer_type": delta["answer_type"], "sources": delta["sources"]}
+                       "answer_type": delta["answer_type"], "sources": delta["sources"],
+                       "message_id": delta.get("assistant_message_id") or ""}
+                qc = delta.get("quote_confirm")
+                if qc:
+                    yield {"event": "confirm", "question": qc.get("question", ""),
+                           "guessed": qc.get("guessed", ""), "candidates": qc.get("candidates", [])}
                 for chunk in _chunks(delta["answer"]):
                     yield {"event": "token", "text": chunk}

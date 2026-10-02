@@ -17,7 +17,17 @@ export default function ChatPage() {
   const [sessionNotice, setSessionNotice] = useState<string | null>(null);
 
   const { sessions, refresh, loadMessages, remove } = useSessions();
-  const { messages, status, sessionId, restoredId, send, newSession, switchTo } = useChat({
+  const {
+    messages,
+    status,
+    sessionId,
+    restoredId,
+    send,
+    newSession,
+    switchTo,
+    submitFeedback,
+    resolveConfirm,
+  } = useChat({
     onTurnEnd: refresh,
   });
   const sending = status === 'sending';
@@ -102,7 +112,12 @@ export default function ChatPage() {
           )}
           <div className="flex-1 overflow-y-auto px-6 py-6">
             <div className="mx-auto h-full max-w-3xl">
-              <MessageList messages={messages} autoCite={autoCite} />
+              <MessageList
+                messages={messages}
+                autoCite={autoCite}
+                onFeedback={(id, category, comment) => void submitFeedback(id, category, comment)}
+                onResolveConfirm={(id, candidate) => void resolveConfirm(id, candidate)}
+              />
             </div>
           </div>
           <InputBox

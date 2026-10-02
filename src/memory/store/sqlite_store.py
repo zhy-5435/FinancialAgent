@@ -158,6 +158,31 @@ class ConversationStore:
         finally:
             conn.close()
 
+    def get_message(self, message_id: str) -> StoredMessage | None:
+        """按 message_id 取单条消息（供反馈标注服务端回填 answer_type/intent/提问上下文）"""
+        conn = self._get_conn()
+        try:
+            row = conn.execute(
+                f"SELECT {_msg_select()} FROM conversation_message WHERE message_id = ?",
+                (message_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        return self._row_to_msg(row) if row else None
+
+    def preceding_user_question(self, session_id: str, before_seq: int) -> str | None:
+        """取该序号之前最近的一条 user 提问正文（已脱敏），供反馈记录回显问题语境"""
+        conn = self._get_conn()
+        try:
+            row = conn.execute(
+                "SELECT content FROM conversation_message "
+                "WHERE session_id = ? AND role = 'user' AND seq < ? ORDER BY seq DESC LIMIT 1",
+                (session_id, before_seq),
+            ).fetchone()
+        finally:
+            conn.close()
+        return row[0] if row else None
+
     # ---------- 会话列表（历史恢复）----------
 
     def list_sessions(self, limit: int = 50) -> list[SessionSummary]:

@@ -5,8 +5,18 @@
 import { useCallback, useEffect, useState } from 'react';
 
 import { ApiError } from '../api/client';
-import { sendChat, streamChat } from '../api/agent';
-import type { AnswerType, ChatResponse, RestoredMessage, SourceHit, TraceStep } from '../api/types';
+import { confirmQuote, sendChat, sendFeedback, streamChat } from '../api/agent';
+import type {
+  AnswerType,
+  ChatResponse,
+  FeedbackCategory,
+  QuoteCandidate,
+  QuoteConfirmPayload,
+  RestoredMessage,
+  SourceHit,
+  StreamConfirmEvent,
+  TraceStep,
+} from '../api/types';
 
 export type MessageRole = 'user' | 'assistant';
 /** normal=正常回答；refused=拒答话术；error=链路错误提示；pending=等待首包骨架；streaming=流式打字中 */
@@ -31,6 +41,16 @@ export interface ChatMessage {
   steps?: ChatStep[];
   elapsedMs?: number;
   serverMessageId?: string;
+  /** 作答类型（供反馈/确认渲染判定；旧数据可为空） */
+  answerType?: AnswerType;
+  /** 行情灰色确认载荷（answer_type=confirm 时非空，供内联候选点选） */
+  confirm?: QuoteConfirmPayload;
+  /** 已点选确认的候选代码（确认条置灰、防重复提交） */
+  confirmResolved?: string;
+  /** 已提交的反馈类别（回显选中态） */
+  feedback?: FeedbackCategory | null;
+  /** 反馈提交中 */
+  feedbackPending?: boolean;
 }
 
 export type ChatStatus = 'idle' | 'sending';
@@ -78,6 +98,8 @@ function toAssistantMessage(res: ChatResponse): ChatMessage {
     steps: fromTrace(res.steps),
     elapsedMs: res.elapsed_ms,
     serverMessageId: res.message_id,
+    answerType: res.answer_type,
+    confirm: res.confirm ?? undefined,
   };
 }
 
@@ -143,6 +165,7 @@ export function useChat(options: UseChatOptions = {}) {
     let sources: SourceHit[] = [];
     let serverMessageId: string | undefined;
     let steps: ChatStep[] = []; // Agent Loop 过程轨迹（plan/step 事件增量累积）
+    let confirmPayload: QuoteConfirmPayload | null = null; // 行情灰色确认候选（confirm 事件）
     let rendered = ''; // 已上屏文本
     let pendingBuf = ''; // 本帧新增增量
     let raf = 0;
@@ -166,6 +189,15 @@ export function useChat(options: UseChatOptions = {}) {
       steps = [...steps, step];
       const target = streamId ?? pendingId;
       setMessages((prev) => prev.map((m) => (m.id === target ? { ...m, steps } : m)));
+    };
+
+    /** 暂存行情确认候选并实时挂到当前气泡（confirm 事件先于/独立于 token 到达） */
+    const setConfirm = (c: StreamConfirmEvent) => {
+      confirmPayload = { question: c.question, guessed: c.guessed, candidates: c.candidates };
+      const target = streamId ?? pendingId;
+      setMessages((prev) =>
+        prev.map((m) => (m.id === target ? { ...m, confirm: confirmPayload! } : m)),
+      );
     };
 
     const flush = () => {
@@ -203,6 +235,8 @@ export function useChat(options: UseChatOptions = {}) {
                 steps,
                 elapsedMs,
                 serverMessageId,
+                answerType,
+                confirm: confirmPayload ?? undefined,
               }
             : m,
         ),
@@ -230,6 +264,7 @@ export function useChat(options: UseChatOptions = {}) {
           pushStep({ kind: 'plan', text: plan.text, tools: plan.tools.map((t) => t.name) }),
         onStep: (step) =>
           pushStep({ kind: 'tool', name: step.name, ok: step.ok, summary: step.summary }),
+        onConfirm: (c) => setConfirm(c),
         onToken: ({ text: token }) => {
           ensureStreamBubble(); // 首 token 到达才把「正在检索…」换成流式打字气泡
           pendingBuf += token;
@@ -267,5 +302,94 @@ export function useChat(options: UseChatOptions = {}) {
     }
   }, [status, sessionId, onTurnEnd]);
 
-  return { messages, status, sessionId, restoredId, send, newSession, switchTo };
+  /** 提交回答反馈标注（纯增量、不阻断对话）：以 serverMessageId 为锚，乐观更新选中态、失败回滚 */
+  const submitFeedback = useCallback(
+    async (messageId: string, category: FeedbackCategory, comment?: string | null) => {
+      const target = messages.find((m) => m.id === messageId);
+      const serverMessageId = target?.serverMessageId;
+      if (!serverMessageId) return; // 无 memory 锚点（旧链路/异常）不发，避免脏标注
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === messageId ? { ...m, feedback: category, feedbackPending: true } : m,
+        ),
+      );
+      try {
+        await sendFeedback({
+          session_id: sessionId,
+          message_id: serverMessageId,
+          category,
+          comment: comment ?? null,
+        });
+        setMessages((prev) =>
+          prev.map((m) => (m.id === messageId ? { ...m, feedbackPending: false } : m)),
+        );
+      } catch (e) {
+        console.warn('反馈提交失败', e);
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === messageId ? { ...m, feedback: null, feedbackPending: false } : m,
+          ),
+        );
+      }
+    },
+    [messages, sessionId],
+  );
+
+  /** 行情灰色确认：点选候选后按取数键确定性取数，追加「点选(user) + 行情(assistant)」两条气泡 */
+  const resolveConfirm = useCallback(
+    async (messageId: string, candidate: QuoteCandidate) => {
+      const marketTag = candidate.market ? `（${candidate.market}）` : '';
+      const userNote = `已选择标的：${candidate.name}${marketTag}，查询其最新实时行情`;
+      const pendingId = genId('p');
+      setMessages((prev) => [
+        // 确认条置灰锁定（记录已选 code），避免重复提交
+        ...prev.map((m) => (m.id === messageId ? { ...m, confirmResolved: candidate.code } : m)),
+        { id: genId('m'), role: 'user', kind: 'normal', content: userNote },
+        { id: pendingId, role: 'assistant', kind: 'pending', content: '' },
+      ]);
+      try {
+        const res = await confirmQuote({
+          session_id: sessionId,
+          code: candidate.code,
+          name: candidate.name,
+        });
+        setMessages((prev) =>
+          prev
+            .filter((m) => m.id !== pendingId)
+            .concat({
+              id: genId('m'),
+              role: 'assistant',
+              kind: 'normal',
+              content: res.answer,
+              answerType: res.answer_type,
+              serverMessageId: res.message_id,
+              elapsedMs: res.elapsed_ms,
+            }),
+        );
+      } catch (e) {
+        const detail =
+          e instanceof ApiError ? e.detail : '行情取数失败，请稍后重试或改用准确名称/代码';
+        setMessages((prev) =>
+          prev
+            .filter((m) => m.id !== pendingId)
+            .concat({ id: genId('m'), role: 'assistant', kind: 'error', content: detail }),
+        );
+      } finally {
+        onTurnEnd?.();
+      }
+    },
+    [sessionId, onTurnEnd],
+  );
+
+  return {
+    messages,
+    status,
+    sessionId,
+    restoredId,
+    send,
+    newSession,
+    switchTo,
+    submitFeedback,
+    resolveConfirm,
+  };
 }

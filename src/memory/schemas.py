@@ -15,7 +15,8 @@ MessageRole = Literal["user", "assistant", "tool", "system-summary"]
 
 # 意图与作答类型枚举：与 src/agent/schemas.py、intent.py 保持同一组取值
 IntentName = Literal["kb_qa", "chitchat", "news_search", "quote_query"]
-AnswerType = Literal["generated", "refused", "chatted", "searched", "quoted"]
+# 作答类型：含 agentic（多工具自主循环）与 confirm（行情灰色区间事前确认），与 L3 graph finalize 产出对齐
+AnswerType = Literal["generated", "refused", "chatted", "searched", "quoted", "agentic", "confirm"]
 
 # 压缩作用域与被覆盖状态
 CompressionScope = Literal["local", "global"]
@@ -84,6 +85,28 @@ class SessionSummary(BaseModel):
     title: str = Field("", description="会话标题（首条用户提问）")
     updated_at: str | None = Field(None, description="最近一条消息时间")
     message_count: int = Field(0, description="消息总数")
+
+
+# 反馈标注类别：useful=有用 / useless=无用 / correction=内容纠错（HITL 反馈闭环）
+FeedbackCategory = Literal["useful", "useless", "correction"]
+
+
+class FeedbackRecord(BaseModel):
+    """回答反馈标注（对应 answer_feedback 表）：拒答/低置信案例回流，判定「补文档」还是「调阈值」。
+
+    纯增量的离线标注数据，不参与任何运行时决策；answer_type/intent/question 在落库时从被反馈的
+    助手消息（conversation_message）服务端回填，不采信前端上送，避免污染校准数据集。
+    """
+
+    feedback_id: str = Field(..., description="反馈记录唯一 ID")
+    session_id: str = Field(..., description="会话 ID")
+    message_id: str = Field(..., description="被反馈的助手回答消息 ID（conversation_message.message_id）")
+    category: FeedbackCategory = Field(..., description="反馈类别")
+    comment: str | None = Field(None, description="内容纠错说明（category=correction 时）")
+    answer_type: str | None = Field(None, description="被反馈回答的作答类型快照（服务端回填）")
+    intent: str | None = Field(None, description="被反馈回答的意图快照（服务端回填）")
+    question: str | None = Field(None, description="对应的用户提问快照（服务端回填，已脱敏）")
+    created_at: str | None = Field(None, description="落库时间")
 
 
 class TokenReport(BaseModel):
