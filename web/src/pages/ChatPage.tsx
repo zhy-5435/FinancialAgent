@@ -1,7 +1,7 @@
 // 问答页：模仿 codex1.html App 布局——(Sidebar | Main 引导/消息 + 输入区)
 // 会话记忆接线：侧栏历史会话 = 后端 memory 存档；回合结束刷新列表，选旧会话即恢复历史
 
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import { ApiError } from '../api/client';
 import InputBox from '../components/Chat/InputBox';
@@ -17,10 +17,28 @@ export default function ChatPage() {
   const [sessionNotice, setSessionNotice] = useState<string | null>(null);
 
   const { sessions, refresh, loadMessages, remove } = useSessions();
-  const { messages, status, sessionId, send, newSession, switchTo } = useChat({
+  const { messages, status, sessionId, restoredId, send, newSession, switchTo } = useChat({
     onTurnEnd: refresh,
   });
   const sending = status === 'sending';
+
+  // 整页重载（切到其他 App 后再进入致页面重新挂载）后，据持久化的活跃会话恢复原对话：
+  // 仅首挂载执行一次——拉取存档历史回填消息流；会话已删或为空则维持当前会话，不打断用户
+  useEffect(() => {
+    if (!restoredId) return;
+    let cancelled = false;
+    loadMessages(restoredId)
+      .then((restored) => {
+        if (!cancelled && restored.length > 0) switchTo(restoredId, restored);
+      })
+      .catch(() => {
+        /* 后端存档不可达/已删除：保持当前会话，不弹错误打断首屏 */
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const describeError = (e: unknown, fallback: string) =>
     e instanceof ApiError ? `${fallback}：${e.detail}` : fallback;

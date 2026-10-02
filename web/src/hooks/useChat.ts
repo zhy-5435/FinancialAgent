@@ -2,7 +2,7 @@
 // 问答主链路走 SSE 流式（打印机效果），404 时自动回退整包 /chat
 // session_id 由前端生成并随请求上送，后端按其持久化多轮历史（列表/恢复/删除见 useSessions）
 
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import { ApiError } from '../api/client';
 import { sendChat, streamChat } from '../api/agent';
@@ -37,6 +37,15 @@ export type ChatStatus = 'idle' | 'sending';
 
 function genId(prefix: string): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
+}
+
+/** 当前活跃会话 ID 的本地持久化键：整页重载（切到其他 App 后回收/刷新）据此恢复原对话而非每次新开 */
+const ACTIVE_SESSION_KEY = 'fin-l1-active-session';
+
+/** 读取本地持久化的会话 ID（仅接受本应用生成的 sess- 前缀，脏值视为无） */
+function readStoredSessionId(): string | null {
+  const saved = localStorage.getItem(ACTIVE_SESSION_KEY);
+  return saved && saved.startsWith('sess-') ? saved : null;
 }
 
 /**
@@ -93,7 +102,14 @@ export function useChat(options: UseChatOptions = {}) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [status, setStatus] = useState<ChatStatus>('idle');
   // 会话 ID 提升为状态：侧栏选中历史会话需高亮当前会话
-  const [sessionId, setSessionId] = useState<string>(() => genId('sess'));
+  // 首帧优先复用本地持久化的活跃会话（整页重载后恢复原对话）；无持久化则新建空会话
+  const [restoredId] = useState<string | null>(readStoredSessionId);
+  const [sessionId, setSessionId] = useState<string>(() => restoredId ?? genId('sess'));
+
+  // 活跃会话随状态写入本地：下次整页重载据上次会话恢复，避免「重新进入即新对话」
+  useEffect(() => {
+    localStorage.setItem(ACTIVE_SESSION_KEY, sessionId);
+  }, [sessionId]);
 
   const newSession = useCallback(() => {
     setMessages([]);
@@ -251,5 +267,5 @@ export function useChat(options: UseChatOptions = {}) {
     }
   }, [status, sessionId, onTurnEnd]);
 
-  return { messages, status, sessionId, send, newSession, switchTo };
+  return { messages, status, sessionId, restoredId, send, newSession, switchTo };
 }
