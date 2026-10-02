@@ -56,6 +56,7 @@ class ChatResponse(BaseModel):
     sources: list[SourceHit] = Field(default_factory=list, description="作答依据切片列表，非 kb_qa 分支与拒答时为空")
     steps: list[dict] | None = Field(None, description="Agent Loop 过程轨迹（plan / tool_result 事件序列），供前端展示推理过程；缺省不下发")
     confirm: dict | None = Field(None, description="answer_type=confirm 时的行情确认载荷（question/guessed/candidates），其余为 null；缺省不下发")
+    security: dict | None = Field(None, description="S3.3 输出审计结论（checked/injection_detected/intercepted/violations/suspicious_tools）；增量可选字段，旧客户端忽略不影响渲染；缺省不下发")
     elapsed_ms: int = Field(..., description="本次问答耗时（毫秒）")
 
 

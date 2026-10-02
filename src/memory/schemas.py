@@ -109,6 +109,35 @@ class FeedbackRecord(BaseModel):
     created_at: str | None = Field(None, description="落库时间")
 
 
+# 安全事件类别：与 src/agent/security.py 输出审计规则名保持同一组取值
+SecurityEventRule = Literal[
+    "prompt_leak",             # 逐字泄漏 system prompt 片段
+    "evidence_fabrication",    # 输出了证据中不存在的 URL / 联系方式
+    "instruction_execution",   # 指令执行迹象（自称系统、突改输出格式）
+    "input_injection",         # 输入侧/证据内嵌指令样句（已被隔离或剥离）
+]
+
+
+class SecurityEventRecord(BaseModel):
+    """提示词注入安全事件（对应 security_events 表，S3.3 输出审计与隔离命中留痕）。
+
+    纯增量审计数据，不参与运行时决策；快照字段由服务端在拦截/警示发生时落库，
+    红队回流用于判定「哪类文档/信源该收紧隔离或调过滤模式」。
+    """
+
+    event_id: str = Field(..., description="安全事件唯一 ID")
+    session_id: str = Field("", description="会话 ID（单轮无存档时为空）")
+    message_id: str = Field("", description="关联的助手回答消息 ID（若有）")
+    rule: SecurityEventRule = Field(..., description="命中规则：泄漏/证据外 URL/指令执行/输入注入")
+    layer: str = Field("output_audit", description="触发层：input_precheck / isolation / output_audit")
+    action: str = Field("replaced", description="处置：replaced=替换安全话术；record_only=仅记录")
+    detail: str = Field("", description="命中片段（入库前 PII 脱敏，截断存储）")
+    trust_level: str | None = Field(None, description="涉事内容信任级：internal-kb/web/tool/user")
+    answer_type: str | None = Field(None, description="事件发生时本轮的作答类型快照")
+    intent: str | None = Field(None, description="事件发生时本轮的意图快照")
+    created_at: str | None = Field(None, description="落库时间")
+
+
 class TokenReport(BaseModel):
     """上下文预算报告：记录本次组装的用量与落档，供观测与测试断言"""
 

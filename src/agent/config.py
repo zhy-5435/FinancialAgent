@@ -153,6 +153,23 @@ WEB_POLICY_SOURCES = {
 }
 
 
+# ---------- 提示词注入纵深防御（S3.3：内容分级 + 结构化隔离 + 输出审计） ----------
+# 总开关：true=对进入 prompt 的外部内容做定界符包裹与信任级标注（结构化隔离）
+PROMPT_GUARD_ENABLED = os.getenv("PROMPT_GUARD_ENABLED", "true").lower() in ("1", "true", "yes")
+# 低信任源（web/tool/MCP）正文的指令模式剥离开关：命中「忽略指令/输出系统提示词」等样句替换为占位符；
+# 知识库切片属中信任源，**不受本项影响**（正文必须逐字保留以守「数字与原文一致」的金融不变量）
+PROMPT_GUARD_FILTER_UNTRUSTED = os.getenv("PROMPT_GUARD_FILTER_UNTRUSTED", "true").lower() in ("1", "true", "yes")
+# 输出审计开关：回答生成后规则检测 system prompt 泄漏 / 证据外 URL 与联系方式 / 指令执行迹象
+OUTPUT_AUDIT_ENABLED = os.getenv("OUTPUT_AUDIT_ENABLED", "true").lower() in ("1", "true", "yes")
+# 命中审计后是否拦截并替换为安全话术（false=仅记录安全事件不改答案，供灰度观察期使用）
+OUTPUT_AUDIT_INTERCEPT = os.getenv("OUTPUT_AUDIT_INTERCEPT", "true").lower() in ("1", "true", "yes")
+# 判定「逐字泄漏机密提示词」的最小连续匹配长度（字符）：低于此长度视为正常术语复用。
+# 24 由实测定标：能力自介逐字复述铁律里的域名词枚举（如「条款费率期限风险等级监管规则等」）最长≈20，
+# 应容忍；而真实提示词外泄（整段复述铁律/注入免疫）连续重合达 60+，远超此值仍可稳拦。
+PROMPT_LEAK_MIN_LEN = int(os.getenv("PROMPT_LEAK_MIN_LEN", "24"))
+# 安全事件是否落库审计（l1_memory.db 独立表 security_events，与权威库物理隔离）
+SECURITY_EVENTS_PERSIST = os.getenv("SECURITY_EVENTS_PERSIST", "true").lower() in ("1", "true", "yes")
+
 # ---------- L3 Agent HTTP 服务 ----------
 AGENT_API_HOST = os.getenv("AGENT_API_HOST", "0.0.0.0")
 AGENT_API_PORT = int(os.getenv("AGENT_API_PORT", "8001"))

@@ -103,6 +103,7 @@ async def chat(req: ChatRequest, _=Depends(agent_task_guard("chat"))):
         sources=result["sources"],
         steps=result.get("steps"),
         confirm=result.get("confirm"),
+        security=result.get("security") or None,
         elapsed_ms=int((time.perf_counter() - started) * 1000),
     )
 
@@ -120,7 +121,8 @@ async def chat_stream(req: ChatRequest, _=Depends(agent_task_guard("chat_stream"
         step   单个工具执行结果：name / ok / summary（新增过程事件）
         meta   终答就绪即推送：intent + answer_type + sources + session_id/message_id
         confirm 行情灰色确认（新增过程事件，旧前端可忽略）：question + guessed + candidates（候选标的，无数字）
-        token  终答文本分片（拒答/行情/无素材为定稿文本分片）
+        security 提示词注入审计命中（S3.3，新增过程事件，旧前端可忽略）：intercepted + injection_detected + violations
+        token  终答文本分片（拒答/行情/无素材为定稿文本分片；命中审计拦截时为安全话术）
         done   正常结束：elapsed_ms
         error  链路异常：detail（如 L2 不可用，对应 502 语义）
     """
@@ -145,6 +147,16 @@ async def chat_stream(req: ChatRequest, _=Depends(agent_task_guard("chat_stream"
                         "intent": ev["intent"],
                         "answer_type": ev["answer_type"],
                         "sources": ev["sources"],
+                        "security": ev.get("security") or {},
+                    })
+                elif etype == "security":
+                    # S3.3 输出审计命中安全事件（旧前端忽略此事件不影响渲染）
+                    yield _sse("security", {
+                        "session_id": session_id,
+                        "message_id": real_message_id,
+                        "intercepted": ev.get("intercepted", False),
+                        "injection_detected": ev.get("injection_detected", False),
+                        "violations": ev.get("violations", []),
                     })
                 elif etype == "confirm":
                     # 行情灰色确认：候选标的（无数字）交前端内联点选，旧前端忽略此事件不影响话术渲染

@@ -10,6 +10,8 @@
 
 - act 同一步内对多个 tool_calls 用 asyncio.gather 并发，逐个套 超时→重试→熔断→失败语义（registry.run_tool）。
 - 三条防幻觉不变量在 finalize 硬保证（不依赖模型自觉）：行情数字逐字不转写、知识库无有效证据即拒答、简报无素材固定话术。
+- S3.3 注入纵深防御：act 产出经 security.wrap_external_content 定界符包裹+信任级标注（结构化隔离），
+  finalize 的 _emit 出口经 security.audit_answer 检测泄漏/证据外 URL/指令执行迹象，命中替换安全话术并落库安全事件。
 - invoke 与 stream 收敛为同一张图：aask_detail 走 ainvoke，aask_stream 走 astream，消除双链路漂移。
 """
 from __future__ import annotations
@@ -34,21 +36,33 @@ from src.agent.config import (
     AGENT_LOOP_ENABLED,
     AGENT_LOOP_TIMEOUT_SECONDS,
     AGENT_MAX_STEPS,
+    PROMPT_GUARD_FILTER_UNTRUSTED,
 )
 from src.agent.intent import rule_classify
 from src.agent.llm import llm
 from src.agent.quote_service import looks_like_quote_query, precheck_quote_ambiguity
 from src.agent.prompts import (
     AGENT_BUDGET_NOTE,
+    AGENT_INTERNAL_RULES_PROMPT,
     AGENT_SYSTEM_PROMPT,
     NEWS_NO_EVIDENCE_ANSWER,
     REFUSAL_ANSWER,
+    SECURITY_SAFE_ANSWER,
+    SECURITY_SUSPICIOUS_NOTE,
 )
 from src.agent.registry import ToolResult, registry, run_tool
+from src.agent.security import (
+    TrustLevel,
+    audit_answer,
+    scan_instruction_patterns,
+    strip_guard_boilerplate,
+    wrap_external_content,
+)
 # 导入 tools 以触发工具向 registry 的注册（副作用）
 import src.agent.tools  # noqa: F401  isort:skip
 from src.agent.web_search import EMPTY_RESULT
 from src.memory.memory_manager import memory_manager
+from src.memory.schemas import SecurityEventRecord
 
 
 class AgentState(TypedDict):
@@ -66,6 +80,9 @@ class AgentState(TypedDict):
     quote_confirm: dict | None            # 行情多标的歧义的确认载荷（候选标的，供 SSE confirm 事件）
     hard_tool_failed: bool                # hard 语义工具（kb 检索）失败 → 触发拒答
     budget_exceeded: bool                 # 步数/墙钟超限
+    system_prompt: str                    # 本轮实际使用的系统提示（输出审计的泄漏比对基准）
+    suspicious_trust: list[str]           # 检出注入样句的信任级（隔离层留痕，供警示与审计）
+    security: dict                        # 输出审计结论（violations/intercepted 等，供 API 透出）
     answer: str
     answer_type: str
     intent: str
@@ -101,21 +118,39 @@ def _render_kb_block(hits: list[dict], start: int) -> str:
     return "\n\n".join(blocks) if blocks else "（无相似度达标的知识库切片）"
 
 
-def _tool_message_content(name: str, res: ToolResult, kb_start: int) -> str:
-    """把工具结果转成给模型阅读的字符串（失败/降级给明确占位，供 replan 判断）。"""
+def _wrapped_tool_message_content(
+    name: str, res: ToolResult, kb_start: int
+) -> tuple[str, list[str]]:
+    """把工具结果转成给模型阅读的**结构化隔离数据块**（失败/降级给明确占位，供 replan 判断）。
+
+    S3.3 第二层：证据不再裸文本入 prompt，改由显式定界符包裹 + 信任级标注 + 数据总纲声明；
+    低信任源（web/tool）正文中的指令样句被剥离为占位符，命中清单随返回值上报供警示与审计；
+    知识库切片属中信任源，正文逐字保留不剥离（守「数字与原文一致」不变量）。
+    """
+    spec = registry.get(name)
+    trust = TrustLevel.parse(spec.trust_level if spec else None)
     if not res.ok:
-        return f"工具 {name} 调用失败：{res.error or '未知错误'}"
+        return f"工具 {name} 调用失败：{res.error or '未知错误'}", []
     if name == "search_knowledge":
-        return _render_kb_block(res.data, kb_start)
-    if name == "search_realtime_quote":
+        raw = _render_kb_block(res.data, kb_start)
+    elif name == "search_realtime_quote":
         data = res.data or {}
         if data.get("confirm"):
-            return "行情标的存在多个候选（歧义），未直接作答：" + (data.get("markdown") or "")
-        if not data.get("ok"):
-            return "行情工具未能取数：" + (data.get("markdown") or "无数据")
-        return data.get("markdown", "")
-    # web_search 返回证据块字符串
-    return res.data or EMPTY_RESULT
+            raw = "行情标的存在多个候选（歧义），未直接作答：" + (data.get("markdown") or "")
+        elif not data.get("ok"):
+            raw = "行情工具未能取数：" + (data.get("markdown") or "无数据")
+        else:
+            raw = data.get("markdown", "")
+    else:
+        # web_search 返回证据块字符串
+        raw = res.data or EMPTY_RESULT
+    # 仅对确会被剥离的低信任源扫描注入样句（中信任 KB 不剥离，不得虚报「已过滤」）
+    hits = (
+        scan_instruction_patterns(raw).hits
+        if (trust.untrusted and PROMPT_GUARD_FILTER_UNTRUSTED)
+        else []
+    )
+    return wrap_external_content(raw, trust, source_label=name), hits
 
 
 # ---------- 节点 ----------
@@ -163,6 +198,9 @@ def prepare(state: AgentState) -> dict:
         "quote_confirm": quote_confirm,
         "hard_tool_failed": False,
         "budget_exceeded": False,
+        "system_prompt": AGENT_SYSTEM_PROMPT,
+        "suspicious_trust": [],
+        "security": {},
     }
 
 
@@ -213,6 +251,7 @@ async def act(state: AgentState) -> dict:
     quote_markdown = state["quote_markdown"]
     quote_confirm = state.get("quote_confirm")
     hard_tool_failed = state["hard_tool_failed"]
+    suspicious_trust = list(state.get("suspicious_trust") or [])
 
     for tc, res in zip(tool_calls, results):
         name = tc["name"]
@@ -232,7 +271,10 @@ async def act(state: AgentState) -> dict:
         if not res.ok and spec is not None and spec.failure_class == "hard":
             hard_tool_failed = True
 
-        content = _tool_message_content(name, res, kb_start)
+        content, hits = _wrapped_tool_message_content(name, res, kb_start)
+        if hits and name not in suspicious_trust:
+            # 隔离层留痕：记录检出注入样句的工具（同一工具多步命中去重），供终答警示与审计
+            suspicious_trust.append(name)
         tool_msgs.append(ToolMessage(content=content, tool_call_id=tc["id"], name=name))
         trace.append({
             "type": "tool_result", "step": state["step"], "name": name,
@@ -252,6 +294,7 @@ async def act(state: AgentState) -> dict:
         "quote_markdown": quote_markdown,
         "quote_confirm": quote_confirm,
         "hard_tool_failed": hard_tool_failed,
+        "suspicious_trust": suspicious_trust,
     }
 
 
@@ -323,20 +366,123 @@ async def finalize(state: AgentState) -> dict:
 
 
 def _emit(state: AgentState, answer: str, answer_type: str, intent: str, sources: list[dict], **extra) -> dict:
-    """落库本轮助手回答并返回 finalize 的 state 增量；回写 memory 消息 ID 供前端反馈锚定。"""
+    """终答出口：先过 S3.3 输出审计（命中即替换安全话术并留痕），再落库本轮助手回答。
+
+    审计置于落库之前，保证 memory 存档的也是终态文本；可疑注入警示只追加到模型生成类
+    回答（拒答/固定话术/行情逐字文本不追加，守「quoted 不改写」不变量）。
+    """
+    security = _audit_final_answer(state, answer, answer_type, intent)
+    if security["intercepted"]:
+        answer = SECURITY_SAFE_ANSWER
+    elif security["warn"]:
+        answer = answer + SECURITY_SUSPICIOUS_NOTE
     assistant_message_id = ""
     if state["session_id"]:
         assistant_message_id = memory_manager.remember_assistant(
             state["session_id"], answer, answer_type, intent=intent
         ).message_id
+    _persist_security_events(state, security, assistant_message_id, answer_type, intent)
     return {
         "answer": answer,
         "answer_type": answer_type,
         "intent": intent,
         "sources": sources,
         "assistant_message_id": assistant_message_id,
+        "security": security["report"],
         **extra,
     }
+
+
+# ---------- S3.3 第三层：输出审计 ----------
+
+# 模型生成类作答：仅这些类型才追加可疑警示（固定话术与 quoted 逐字文本保持原形）
+_GENERATED_TYPES = frozenset({"generated", "searched", "chatted", "agentic"})
+
+
+def _evidence_text(state: AgentState) -> str:
+    """汇总本轮全部入 prompt 的证据原文（kb 切片字段 + 网搜素材 + 行情 markdown），
+    供审计判定回答中的 URL / 联系方式是否「证据中不存在」。"""
+    parts: list[str] = []
+    for hit in state["sources"]:
+        parts.extend(
+            str(hit.get(k) or "") for k in
+            ("content", "original_text", "doc_name", "heading_path", "clause_position")
+        )
+    if state.get("quote_markdown"):
+        parts.append(state["quote_markdown"])
+    parts.extend(state.get("news_evidence") or [])
+    # 排除隔离包裹样板（与 system prompt 总纲措辞同源，防自匹配误报）
+    return strip_guard_boilerplate("\n".join(parts))
+
+
+def _audit_final_answer(state: AgentState, answer: str, answer_type: str, intent: str) -> dict:
+    """对终答跑规则审计 + 隔离层可疑判定，返回拦截/警示决策与违规清单。"""
+    from src.agent.config import OUTPUT_AUDIT_ENABLED
+
+    audit = audit_answer(
+        answer,
+        system_prompt=state.get("system_prompt") or AGENT_SYSTEM_PROMPT,
+        leak_basis=AGENT_INTERNAL_RULES_PROMPT,
+        evidence_text=_evidence_text(state),
+        answer_type=answer_type,
+    )
+    violations = list(audit.violations)
+    suspicious = bool(state.get("suspicious_trust"))
+    if suspicious:
+        violations.append({
+            "rule": "input_injection",
+            "detail": "、".join(state["suspicious_trust"]),
+            "action": "warned",
+        })
+    # 可疑警示只加在模型生成类回答上；固定话术/quoted 保持原形
+    warn = suspicious and not audit.intercepted and answer_type in _GENERATED_TYPES
+    return {
+        "intercepted": audit.intercepted,
+        "warn": warn,
+        "violations": violations,
+        "report": {
+            "checked": OUTPUT_AUDIT_ENABLED,
+            "injection_detected": suspicious,
+            "intercepted": audit.intercepted,
+            "violations": violations,
+            "suspicious_tools": state.get("suspicious_trust") or [],
+        },
+    }
+
+
+def _persist_security_events(
+    state: AgentState, security: dict, message_id: str, answer_type: str, intent: str
+) -> None:
+    """安全事件落库（SECURITY_EVENTS_PERSIST 可关）；落库失败不影响主链路，仅告警留痕。"""
+    from src.agent.config import SECURITY_EVENTS_PERSIST
+
+    if not SECURITY_EVENTS_PERSIST or not state["session_id"] or not security["violations"]:
+        return
+    try:
+        for v in security["violations"]:
+            memory_manager.record_security_event(SecurityEventRecord(
+                event_id="", session_id=state["session_id"], message_id=message_id,
+                rule=v["rule"],
+                layer="isolation" if v["rule"] == "input_injection" else "output_audit",
+                action=v["action"], detail=v.get("detail", ""),
+                trust_level=(
+                    "user" if v["rule"] == "input_injection"
+                    else _trust_of_tool(v.get("detail", ""))
+                ),
+                answer_type=answer_type, intent=intent,
+            ))
+    except Exception as e:  # 审计留痕失败不阻断作答
+        import logging
+
+        logging.getLogger(__name__).warning("安全事件落库失败：%s", e)
+
+
+def _trust_of_tool(detail: str) -> str | None:
+    """隔离层留痕的 detail 为工具名串（如「web_search」），映射回信任级供事件检索；
+    输出审计违规的 detail 为片段，在注册表查不到则返回 None。"""
+    name = detail.split("、")[0].strip() if detail else ""
+    spec = registry.get(name) if name else None
+    return spec.trust_level if spec else None
 
 
 async def _synthesize(messages: list[AnyMessage]) -> str:
@@ -425,6 +571,9 @@ def _initial_state(question: str, session_id: str | None) -> dict:
         "quote_confirm": None,
         "hard_tool_failed": False,
         "budget_exceeded": False,
+        "system_prompt": "",
+        "suspicious_trust": [],
+        "security": {},
         "answer": "",
         "answer_type": "",
         "intent": "",
@@ -435,7 +584,7 @@ def _initial_state(question: str, session_id: str | None) -> dict:
 # ---------- 对外入口（异步原生 + 同步桥接） ----------
 
 async def aask_detail(question: str, session_id: str | None = None) -> dict:
-    """返回 answer / intent / answer_type / sources / steps（供 HTTP 服务层调用）。"""
+    """返回 answer / intent / answer_type / sources / steps / security（供 HTTP 服务层调用）。"""
     state = await agent_graph.ainvoke(_initial_state(question, session_id), config=_RUN_CFG)
     return {
         "answer": state["answer"],
@@ -445,6 +594,7 @@ async def aask_detail(question: str, session_id: str | None = None) -> dict:
         "steps": state.get("trace", []),
         "message_id": state.get("assistant_message_id") or "",
         "confirm": state.get("quote_confirm"),
+        "security": state.get("security") or {},
     }
 
 
@@ -462,9 +612,9 @@ def _chunks(text: str, size: int = 48):
 
 
 async def aask_stream(question: str, session_id: str | None = None) -> AsyncIterator[dict]:
-    """流式问答生成器：由 astream(updates) 驱动，产出 plan / step / meta / token 事件。
+    """流式问答生成器：由 astream(updates) 驱动，产出 plan / step / meta / security / token 事件。
 
-    与 ask_detail 走同一张图；plan/step 为新增过程事件（旧前端静默忽略），
+    与 ask_detail 走同一张图；plan/step/security 为过程事件（旧前端静默忽略），
     meta + token 保持既有契约形状（token 为定稿答案分片，保留打印机效果）。
     """
     async for node_update in agent_graph.astream(
@@ -486,10 +636,18 @@ async def aask_stream(question: str, session_id: str | None = None) -> AsyncIter
             elif node == "finalize":
                 yield {"event": "meta", "intent": delta["intent"],
                        "answer_type": delta["answer_type"], "sources": delta["sources"],
-                       "message_id": delta.get("assistant_message_id") or ""}
+                       "message_id": delta.get("assistant_message_id") or "",
+                       "security": delta.get("security") or {}}
                 qc = delta.get("quote_confirm")
                 if qc:
                     yield {"event": "confirm", "question": qc.get("question", ""),
                            "guessed": qc.get("guessed", ""), "candidates": qc.get("candidates", [])}
+                security = delta.get("security") or {}
+                if security.get("intercepted") or security.get("injection_detected"):
+                    # 新增安全过程事件（旧前端静默忽略不影响渲染）；token 分片已是终态文本
+                    yield {"event": "security",
+                           "intercepted": security.get("intercepted", False),
+                           "injection_detected": security.get("injection_detected", False),
+                           "violations": security.get("violations", [])}
                 for chunk in _chunks(delta["answer"]):
                     yield {"event": "token", "text": chunk}

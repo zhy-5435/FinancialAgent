@@ -12,19 +12,22 @@ from src.memory.schemas import (
     ContextBundle,
     FeedbackCategory,
     FeedbackRecord,
+    SecurityEventRecord,
     SessionSummary,
     StoredMessage,
 )
 from src.memory.store.feedback_store import feedback_store
+from src.memory.store.security_store import security_store
 from src.memory.store.sqlite_store import conversation_store
 
 
 class MemoryManager:
     def __init__(self, store=conversation_store, builder: ContextBuilder | None = None,
-                 feedback=feedback_store):
+                 feedback=feedback_store, security=security_store):
         self.store = store
         self.builder = builder or ContextBuilder()
         self.feedback = feedback
+        self.security = security
 
     # ---------- 构建推理上下文（调用模型前） ----------
 
@@ -122,6 +125,17 @@ class MemoryManager:
                       limit: int = 200) -> list[FeedbackRecord]:
         """按类别/作答类型取最近的反馈标注，供离线校准（拒答 vs 低置信回流分析）。"""
         return self.feedback.list_for_analysis(category=category, answer_type=answer_type, limit=limit)
+
+    # ---------- 提示词注入安全事件（S3.3 审计闭环，纯增量、不参与运行时决策） ----------
+
+    def record_security_event(self, rec: SecurityEventRecord) -> SecurityEventRecord:
+        """落库一条注入/审计安全事件（detail 入库前 PII 脱敏），供红队回流与拦截率观测。"""
+        return self.security.record(rec)
+
+    def list_security_events(self, rule: str | None = None, session_id: str | None = None,
+                             limit: int = 200) -> list[SecurityEventRecord]:
+        """按规则/会话取最近安全事件，供审计回流分析。"""
+        return self.security.list_for_analysis(rule=rule, session_id=session_id, limit=limit)
 
     # ---------- 历史恢复 ----------
 
